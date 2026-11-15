@@ -1,0 +1,20 @@
+[package]
+name = "alsp-gaps"
+description = "Predicted test gaps for the symbols a diff changes: listed mutants, scored by a decision model, never run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[dependencies]
+alsp-coverage = { path = "../alsp-coverage" }
+alsp-decide = { path = "../alsp-decide" }
+alsp-evidence = { path = "../alsp-evidence" }
+alsp-index = { path = "../alsp-index" }
+serde_json.workspace = true
+
+[dev-dependencies]
+alsp-coverage = { path = "../alsp-coverage", features = ["testkit"] }
+tempfile.workspace = true

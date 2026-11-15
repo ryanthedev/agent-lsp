@@ -1,0 +1,25 @@
+[package]
+name = "alsp-coverage"
+description = "Observed line and branch coverage of the symbols a diff changes (cargo llvm-cov, cached)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[features]
+# A fake `cargo` and fixture trees, so tests here and in alsp-gaps run without cargo-llvm-cov,
+# cargo-mutants or any real project.
+testkit = ["dep:tempfile"]
+
+[dependencies]
+alsp-evidence = { path = "../alsp-evidence" }
+alsp-index = { path = "../alsp-index" }
+serde_json.workspace = true
+
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+alsp-coverage = { path = ".", features = ["testkit"] }
+tempfile.workspace = true

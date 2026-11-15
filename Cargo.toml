@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/alsp-decide", "crates/alsp-index", "crates/alsp-evidence", "crates/alsp-coverage", "crates/alsp-gaps", "crates/alsp-query", "crates/alsp-review", "crates/alsp-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ryanthedev/agent-lsp"
+readme = "README.md"
+# Not published to crates.io yet: the internal crates reference each other by path only. To publish,
+# give each path dependency a version and flip this per crate.
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+scip = "0.10"
+protobuf = "=3.7.2"      # must match the version scip pins
+sha2 = "0.10"
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+tempfile = "3"
+quote = "1"
+libc = "0.2"

@@ -1,0 +1,23 @@
+{
+  "name": "alsp",
+  "version": "0.1.0",
+  "description": "Evidence about Rust code for agents: who calls a symbol, which tests reach it, coverage, predicted test gaps, and diff review, from the alsp command-line tool.",
+  "author": { "name": "r" },
+  "license": "MIT",
+  "repository": "https://github.com/ryanthedev/agent-lsp",
+  "keywords": ["rust", "code-review", "callers", "coverage", "test-gaps", "skills"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "alsp",
+    "shortDescription": "Callers, tests, coverage and review for Rust code.",
+    "longDescription": "A skill that teaches agents the alsp command line: type-resolved references, tests that reach a symbol, observed coverage, predicted test gaps, and diff review, each answer marked resolved, observed or predicted.",
+    "developerName": "r",
+    "category": "Coding",
+    "capabilities": ["Read", "Execute"],
+    "defaultPrompt": [
+      "Who calls this function?",
+      "Is this function tested?",
+      "Review my changes with alsp."
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "alsp-index"
+description = "Symbol index of a Rust tree: runs rust-analyzer scip per Cargo root, caches it by content hash, answers definition and reference queries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[dependencies]
+scip.workspace = true
+protobuf.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

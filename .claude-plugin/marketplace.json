@@ -1,0 +1,12 @@
+{
+  "name": "agent-lsp",
+  "description": "alsp: type-resolved answers about Rust code for coding agents.",
+  "owner": { "name": "r" },
+  "plugins": [
+    {
+      "name": "alsp",
+      "source": "./",
+      "description": "Teaches agents the alsp command line: callers, tests, coverage, test gaps and diff review for Rust."
+    }
+  ]
+}

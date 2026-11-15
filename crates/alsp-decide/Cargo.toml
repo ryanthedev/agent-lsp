@@ -1,0 +1,22 @@
+[package]
+name = "alsp-decide"
+description = "Decision-model client: batches yes/no questions through sdd's `decide` command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[features]
+# A fake `bun` + sdd tree for tests; also used by alsp-cli's tests.
+testkit = []
+
+[dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+# Self dev-dependency: turns the test kit on for this crate's own tests.
+alsp-decide = { path = ".", features = ["testkit"] }

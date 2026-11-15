@@ -1,0 +1,94 @@
+# alsp
+
+`alsp` is a command-line tool that gives coding agents evidence about Rust code. An agent asked "who calls this?" or "is this tested?" usually greps and guesses. `alsp` answers from a rust-analyzer index (type-resolved definitions, references and tests) and from measurements (coverage from `cargo llvm-cov`, mutants from `cargo mutants --list` scored by a decision model), and it marks every fact with how it was found. It is a plain program with text and JSON output, so Claude Code, Codex and agy use it the same way, and a plugin skill teaches each of them when to reach for it.
+
+## What you need
+
+- A Rust toolchain, `rust-analyzer` and `git` 2.31 or newer. `alsp` refuses an older git.
+- `cargo-llvm-cov` for `cover`, `tests --run` and coverage in reviews.
+- `cargo-mutants` for `gaps`, plus the `decide` command of [sdd](https://github.com/ryanthedev/sdd) (`src/cli/decide.ts`, run with `bun`), which scores mutants with Google's Gemini. The public sdd repository does not yet include `decide`, so `gaps` needs an sdd checkout that does, found through `ALSP_SDD_ROOT`. `alsp` holds no API key; sdd does. Without it, `gaps` still lists the mutants on lines no test runs, reports the model as unavailable and exits 5; the mutants on covered lines get no score.
+- Optional, for `alsp review --agent`: the `claude`, `codex` or `agy` CLI.
+
+## Install
+
+```
+cargo install --git https://github.com/ryanthedev/agent-lsp alsp-cli
+```
+
+or, from a clone, `cargo install --path crates/alsp-cli`. The binary is `alsp`.
+
+## Quick start
+
+Run these inside a Rust repository. The first query of a large repository builds the index (about 30 s on a big workspace) and later ones reuse it. This output is from `alsp` run on its own source:
+
+```
+$ alsp sym split_markdown_row
+sym index=missing+rebuilt @45c0c3a6
+matches(1) [resolved]
+  fn split_markdown_row crates/alsp-review/src/lib.rs:620 refs=3
+
+$ alsp refs split_markdown_row
+refs split_markdown_row index=fresh @45c0c3a6
+target fn crates/alsp-review/src/lib.rs:620-628 [resolved]
+refs(3 in 2 symbols) [resolved]
+  import_gaps crates/alsp-review/src/lib.rs:633
+  tests::split_markdown_row_handles_escaped_pipes_and_edges crates/alsp-review/src/lib.rs:958,959 [test]
+entry(5) [resolved+heuristic]
+  test tests::split_markdown_row_handles_escaped_pipes_and_edges crates/alsp-review/src/lib.rs:957
+  pub import_gaps crates/alsp-review/src/lib.rs:630~
+  ...
+
+$ alsp tests split_markdown_row
+tests(2) [resolved]
+  tests::split_markdown_row_handles_escaped_pipes_and_edges crates/alsp-review/src/lib.rs:957 direct
+  tests::test_DW_4_7_imports_the_ten_historical_gap_verdicts crates/alsp-review/src/lib.rs:827 indirect
+
+$ alsp cover split_markdown_row     # runs the package's tests under cargo llvm-cov
+$ alsp review --quick               # evidence for everything changed since the last review
+```
+
+`alsp` with no arguments prints a one-screen cheat sheet meant for agents. `alsp gaps <symbol>` lists the mutants in a symbol and the predicted chance the tests catch each.
+
+## Provenance marks
+
+Every section says how its facts were obtained:
+
+| Mark | Meaning |
+|---|---|
+| `[resolved]` | From the rust-analyzer index, or from syntax that leaves no doubt. Treat as fact. |
+| `[observed]` | Measured by running the tests (coverage). |
+| `[predicted]` | Estimated by a model (`gaps`). A lead to check, not a verdict. |
+| trailing `~` | A heuristic, for example `pub` standing in for "reachable from outside the crate". |
+
+Lines starting with `!` are notes (dirty working tree, a root that failed to index, a missing measurement). Read them before quoting a result.
+
+## Use it from an agent
+
+The plugin is one skill, `skills/alsp/SKILL.md`, that teaches Claude Code, Codex and agy which command answers which question and how to read the marks. It does not install the binary. See [docs/plugin.md](docs/plugin.md):
+
+```
+/plugin marketplace add ryanthedev/agent-lsp      # Claude Code
+/plugin install alsp --marketplace ryanthedev/agent-lsp
+codex plugin marketplace add ryanthedev/agent-lsp # Codex
+agy plugin import <path to a clone>               # agy
+```
+
+## Trust and cost
+
+Indexing runs the repository's build scripts and proc macros, because rust-analyzer does. `cover`, `gaps`, `tests --run` and `review --full` also build and run its tests, and `gaps` sends function bodies to Google's Gemini API. Point `alsp` only at code you trust; `--no-build` makes `sym`, `refs` and `tests` (without `--run`) safe on untrusted code, but only against a cached index. Review agents run in a throwaway export of the commit, which is not a sandbox. The details are in [docs/query.md](docs/query.md), "Trust and cost", and [docs/review.md](docs/review.md).
+
+## Documentation
+
+- [docs/query.md](docs/query.md): symbol queries, output formats, JSON keys, exit codes, trust and cost.
+- [docs/review.md](docs/review.md): diff review, agents, the findings ledger and how well findings held up.
+- [docs/plugin.md](docs/plugin.md): installing the skill.
+- [docs/gaps-first-read.md](docs/gaps-first-read.md): a first measurement of predicted test gaps.
+- [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md): building and changing `alsp`.
+
+## Status and limits
+
+Early. Rust only. There is no daemon and no editing: `alsp` reads and measures. Calls through trait objects, function pointers or macros are not followed, so an empty answer means "no resolved references", not "unused". Predicted gaps come from a model reading code; in one measurement about half of the top predictions were real gaps (docs/gaps-first-read.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

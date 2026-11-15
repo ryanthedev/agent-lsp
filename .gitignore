@@ -1,0 +1,26 @@
+# build output
+target/
+
+# alsp working data (findings, ledger, caches)
+.alsp/
+
+# internal planning notes, build logs and worktrees
+.code-foundations/
+
+# secrets and local environment
+*.env
+.env*
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# coverage artifacts
+*.profraw
+*.profdata
+lcov.info
+*.lcov
+
+# local agent settings
+.claude/

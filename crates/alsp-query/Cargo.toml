@@ -1,0 +1,23 @@
+[package]
+name = "alsp-query"
+description = "Diff-free symbol queries: who calls X, which tests reach it, is it covered, would tests catch a bug here"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[dependencies]
+alsp-decide = { path = "../alsp-decide" }
+alsp-index = { path = "../alsp-index" }
+alsp-evidence = { path = "../alsp-evidence" }
+alsp-coverage = { path = "../alsp-coverage" }
+alsp-gaps = { path = "../alsp-gaps" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+alsp-coverage = { path = "../alsp-coverage", features = ["testkit"] }
+alsp-evidence = { path = "../alsp-evidence", features = ["testkit"] }
+tempfile.workspace = true

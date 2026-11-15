@@ -1,0 +1,23 @@
+[package]
+name = "alsp-review"
+description = "Mechanical and agent-assisted review findings with an append-only ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+
+[dependencies]
+alsp-evidence = { path = "../alsp-evidence" }
+alsp-index = { path = "../alsp-index" }
+alsp-decide = { path = "../alsp-decide" }
+serde.workspace = true
+serde_json.workspace = true
+syn.workspace = true
+quote.workspace = true
+sha2.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
