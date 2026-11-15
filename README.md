@@ -6,7 +6,7 @@
 
 - A Rust toolchain, `rust-analyzer` and `git` 2.31 or newer. `alsp` refuses an older git.
 - `cargo-llvm-cov` for `cover`, `tests --run` and coverage in reviews.
-- `cargo-mutants` for `gaps`, plus the `decide` command of [sdd](https://github.com/ryanthedev/sdd) (`src/cli/decide.ts`, run with `bun`), which scores mutants with Google's Gemini. The public sdd repository does not yet include `decide`, so `gaps` needs an sdd checkout that does, found through `ALSP_SDD_ROOT`. `alsp` holds no API key; sdd does. Without it, `gaps` still lists the mutants on lines no test runs, reports the model as unavailable and exits 5; the mutants on covered lines get no score.
+- `cargo-mutants` for `gaps`, plus a clone of [sdd](https://github.com/ryanthedev/sdd) (its `decide` command, `src/cli/decide.ts`, run with [bun](https://bun.sh)), which scores mutants with Google's Gemini. `alsp` finds the clone through `ALSP_SDD_ROOT` (default `~/repos/sdd`) and bun through `ALSP_BUN` (default: `bun` on `PATH`, else `~/.bun/bin/bun`). `alsp` holds no API key; sdd does: see the "Decision calls without MCP" section of sdd's README for `GEMINI_API_KEY` and the budget defaults. Without sdd, `gaps` still lists the mutants on lines no test runs, reports the model as unavailable and exits 5; the mutants on covered lines get no score.
 - Optional, for `alsp review --agent`: the `claude`, `codex` or `agy` CLI.
 
 ## Install
