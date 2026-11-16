@@ -100,6 +100,26 @@ fn line_ranges(lines: &[u32]) -> String {
 }
 
 impl EvidencePack {
+    /// One `Index:` line saying what the facts rest on: the index status, how many Cargo roots are
+    /// in it, each root left out with its cause, and every note the indexer left. Printed by `pack`
+    /// and `review` so a reader can tell an empty answer from an unknown one.
+    pub fn index_line(&self) -> String {
+        let ok = self.index.units.iter().filter(|u| u.ok).count();
+        let mut line = format!("Index: {}{}, {}/{} roots indexed", self.index.status.as_str(), if self.index.rebuilt { "+rebuilt" } else { "" }, ok, self.index.units.len());
+        for u in self.index.units.iter().filter(|u| !u.ok) {
+            line.push_str(&format!("; root {} failed: {}", escape(&u.path), escape(u.detail.as_deref().unwrap_or("unknown"))));
+        }
+        for n in &self.index.notes {
+            line.push_str(&format!("; {}", escape(n)));
+        }
+        line
+    }
+
+    /// Every root is indexed and the indexer left no notes: nothing for the `Index:` line to warn about.
+    pub fn index_is_clean(&self) -> bool {
+        self.index.complete() && self.index.notes.is_empty() && self.facts_served()
+    }
+
     /// A=added M=modified R=removed. `~` marks facts that are not resolved by the index (heuristic).
     pub fn to_text(&self) -> String {
         let ok = self.index.units.iter().filter(|u| u.ok).count();
@@ -113,8 +133,8 @@ impl EvidencePack {
             self.index.units.len(),
             self.symbols.len()
         )];
-        for u in self.index.units.iter().filter(|u| !u.ok) {
-            out.push(format!("! root {} not indexed: {}", escape(&u.path), escape(u.detail.as_deref().unwrap_or("unknown"))));
+        if !self.index_is_clean() {
+            out.push(self.index_line());
         }
         for n in &self.notes {
             out.push(format!("! {}", escape(n)));
@@ -154,10 +174,24 @@ mod tests {
         EvidencePack {
             base: "0123456789abcdef".into(),
             head: "fedcba9876543210".into(),
-            index: IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 5 },
+            index: IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 5, notes: vec![] },
             symbols,
             notes: vec![],
         }
+    }
+
+    #[test]
+    fn index_line_names_failures_notes_and_unknown_symbols() {
+        let mut p = pack(vec![]);
+        assert!(p.index_is_clean() && !p.to_text().contains("Index:"), "a clean index adds no line");
+        p.index.notes.push("tried rust-analyzer at /x".into());
+        assert_eq!(p.index_line(), "Index: fresh, 1/1 roots indexed; tried rust-analyzer at /x");
+        p.index.units[0].ok = false;
+        p.index.units[0].detail = Some("exit 1\nforged".into());
+        let l = p.index_line();
+        assert!(l.contains("0/1 roots indexed; root . failed: exit 1\\nforged; tried rust-analyzer at /x"), "{l}");
+        assert!(!l.contains('\n'), "{l}");
+        assert!(p.to_text().contains(&l));
     }
 
     #[test]
@@ -198,7 +232,7 @@ mod tests {
         p.symbols[0].coverage = Some(Coverage { lines_total: 10, lines_hit: 7, branches_total: None, branches_hit: None, uncovered_changed_lines: vec![] });
         p.symbols[0].gaps.push(PredictedGap { file: "f.rs".into(), line: 3, mutation: "== to !=".into(), p_tests_catch: 0.234, reason: GapReason::PredictedSurvivor });
         let t = p.to_text();
-        assert!(t.starts_with("pack 01234567..fedcba98 index=fresh+rebuilt roots=1/2 symbols=1\n! root bad not indexed: exit 1\n! head is not checked out\n"), "{t}");
+        assert!(t.starts_with("pack 01234567..fedcba98 index=fresh+rebuilt roots=1/2 symbols=1\nIndex: fresh+rebuilt, 1/2 roots indexed; root bad failed: exit 1\n! head is not checked out\n"), "{t}");
         assert!(t.contains("R frame::Frame::fin") && t.contains("heuristic)"));
         assert!(t.contains("  lines 7/10 covered\n  gap f.rs:3 == to != p=0.23\n"), "{t}");
     }

@@ -129,7 +129,7 @@ mod tests {
         EvidencePack {
             base: "b".into(),
             head: "h".into(),
-            index: IndexState { status, rebuilt: false, units, millis: 0 },
+            index: IndexState { status, rebuilt: false, units, millis: 0, notes: vec![] },
             symbols: vec![],
             notes: vec![],
         }

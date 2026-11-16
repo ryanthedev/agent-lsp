@@ -221,9 +221,50 @@ fn test_DW_U_3_quick_review_json_lists_changed_symbols_with_file_and_line() {
 
 #[test]
 fn test_DW_U_3_changed_symbol_lists_are_capped_with_a_count_of_the_rest() {
- let pack=|n:u32|alsp_evidence::EvidencePack{base:"b".into(),head:"h".into(),index:alsp_index::IndexState{status:alsp_index::IndexStatus::Fresh,rebuilt:false,units:vec![],millis:0},notes:vec![],symbols:(0..n).map(|i|alsp_evidence::SymbolEvidence{id:format!("x f{i:03}()."),name:format!("m::f{i:03}"),file:"src/lib.rs".into(),span:alsp_index::Span{start:i+1,end:i+1},kind:alsp_evidence::ChangeKind::Added,callers:vec![],entry_points:vec![],coverage:None,gaps:vec![]}).collect()};
+ let pack=|n:u32|alsp_evidence::EvidencePack{base:"b".into(),head:"h".into(),index:alsp_index::IndexState{status:alsp_index::IndexStatus::Fresh,rebuilt:false,units:vec![alsp_index::UnitReport{path:".".into(),ok:true,detail:None}],millis:0, notes: vec![] },notes:vec![],symbols:(0..n).map(|i|alsp_evidence::SymbolEvidence{id:format!("x f{i:03}()."),name:format!("m::f{i:03}"),file:"src/lib.rs".into(),span:alsp_index::Span{start:i+1,end:i+1},kind:alsp_evidence::ChangeKind::Added,callers:vec![],entry_points:vec![],coverage:None,gaps:vec![]}).collect()};
  let p=pack(40);let text=alsp_review::render_report(&p,&[],0,&[],&[],0);
  assert_eq!(text.lines().filter(|l|l.starts_with("added ")).count(),alsp_review::CHANGED_SYMBOLS_TEXT_CAP);assert!(text.contains("+28 more (alsp pack --base b)"),"{text}");
  let (shown,more)=alsp_review::changed_symbols_json(&p);assert_eq!((shown.len(),more),(alsp_review::CHANGED_SYMBOLS_JSON_CAP,15));
  assert!(alsp_review::render_report(&pack(0),&[],0,&[],&[],0).contains("Changed symbols: none"));
+}
+
+/// An indexer that is installed but cannot index (its `--version` probe still answers).
+fn failing_ra(e:&Fx)->PathBuf { let p=e.tools.path().join("failing-ra");write(e.tools.path(),"failing-ra","#!/bin/sh\nif [ \"$1\" = --version ]; then echo fake-ra; exit 0; fi\necho 'cannot load workspace' >&2\nexit 1\n");fs::set_permissions(&p,fs::Permissions::from_mode(0o755)).unwrap();p }
+
+#[test]
+fn test_DW_1_1_review_without_an_index_exits_3_says_unknown_and_ledgers_nothing() {
+ let e=Fx::new();let _=e.setup();let ra=failing_ra(&e);
+ let o=e.cmd(&["--quick"]).env("ALSP_RUST_ANALYZER",&ra).output().unwrap();let r=out(&o);
+ assert_eq!(o.status.code(),Some(3),"{r} stderr={}",String::from_utf8_lossy(&o.stderr));
+ assert!(r.contains("Index: missing+rebuilt, 0/1 roots indexed; root . failed:")&&r.contains("cannot load workspace"),"{r}");
+ assert!(r.contains("unknown, not unchanged")&&r.contains("Changed symbols: unknown")&&!r.contains("Changed symbols: none"),"{r}");
+ assert!(!e.repo.path().join(".alsp/findings.jsonl").exists()&&!e.repo.path().join(".alsp/reviews.jsonl").exists());
+ // JSON carries the index status, the failed unit and the notes
+ let o=e.cmd(&["--quick","--format","json"]).env("ALSP_RUST_ANALYZER",&ra).output().unwrap();assert_eq!(o.status.code(),Some(3));
+ let j:serde_json::Value=serde_json::from_str(&out(&o)).unwrap();
+ assert_eq!(j["index"]["status"],"missing");assert_eq!(j["index"]["units"][0]["ok"],false);assert_eq!(j["index_served"],false);
+ assert!(j["notes"].as_array().unwrap().iter().any(|n|n.as_str().unwrap().contains("unknown, not unchanged")),"{j}");
+}
+
+#[test]
+fn test_DW_1_1_an_ad_hoc_review_without_an_index_does_not_advance_the_last_review() {
+ let e=Fx::new();let _=e.setup();let ra=failing_ra(&e);
+ git(e.repo.path(),&["checkout","-q","-b","feat"]);git(e.repo.path(),&["branch","-f","main","HEAD~1"]);
+ let mut c=Command::new(env!("CARGO_BIN_EXE_alsp"));c.arg("review").arg("--quick").arg("--committed").arg("--repo").arg(e.repo.path()).env("ALSP_RUST_ANALYZER",&ra).env("ALSP_CACHE_DIR",e.cache.path());
+ let o=c.output().unwrap();assert_eq!(o.status.code(),Some(3),"{} {}",out(&o),String::from_utf8_lossy(&o.stderr));
+ assert!(!e.repo.path().join(".alsp/reviews.jsonl").exists(),"base = last review must not move past unreviewed code");
+}
+
+#[test]
+fn test_DW_1_2_review_with_no_rust_changes_exits_0_with_changed_symbols_none() {
+ let e=Fx::new();let _=e.setup();write(e.repo.path(),"README.md","docs\n");commit(e.repo.path(),"docs only");
+ let o=e.run(&["--quick"]);assert_eq!(o.status.code(),Some(0),"{}",String::from_utf8_lossy(&o.stderr));
+ let r=out(&o);assert!(r.contains("Changed symbols: none")&&!r.contains("unknown"),"{r}");
+}
+
+#[test]
+fn test_DW_1_1_a_servable_index_exits_0_and_json_reports_it() {
+ let e=Fx::new();let _=e.setup();
+ let o=e.run(&["--quick","--format","json"]);assert_eq!(o.status.code(),Some(0),"{}",String::from_utf8_lossy(&o.stderr));
+ let j:serde_json::Value=serde_json::from_str(&out(&o)).unwrap();assert_eq!(j["index_served"],true);assert_eq!(j["index"]["units"][0]["ok"],true);
 }

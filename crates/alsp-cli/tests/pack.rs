@@ -222,7 +222,7 @@ fn test_DW_2_5_one_crate_index_failure_keeps_the_others() {
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
     let t = out(&o);
     assert!(t.contains("roots=1/2"), "{t}");
-    assert!(t.contains("! root bad not indexed: exit 1: cannot load bad"), "{t}");
+    assert!(t.contains("Index: ") && t.contains("root bad failed: exit 1: cannot load bad"), "{t}");
     assert!(t.contains("M lib::helper good/src/lib.rs:4-6"), "good's symbols are still served: {t}");
     assert!(t.contains("bad/src/lib.rs") && t.contains("not in the index"), "bad's changed file is called out, not silently dropped: {t}");
 }
@@ -234,7 +234,7 @@ fn every_root_failing_exits_3_with_the_reasons() {
     let o = e.pack(&["--base", "HEAD~1"]);
     assert_eq!(o.status.code(), Some(3));
     let t = out(&o);
-    assert!(t.contains("roots=0/1") && t.contains("! root . not indexed: exit 1: cannot load") && t.contains("means unknown"), "{t}");
+    assert!(t.contains("roots=0/1") && t.contains("Index: ") && t.contains("root . failed: exit 1: cannot load") && t.contains("means unknown"), "{t}");
 }
 
 #[test]
@@ -267,4 +267,46 @@ fn bad_revisions_and_non_repositories_exit_2_without_running_anything() {
     let o = Command::new(env!("CARGO_BIN_EXE_alsp")).args(["pack", "--repo", "/definitely/not/here", "--base", "HEAD"]).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert_eq!(e.runs(), 0);
+}
+
+#[test]
+fn test_DW_1_1_pack_without_an_index_prints_the_index_line_and_json_carries_status_and_notes() {
+    let e = Env::new();
+    two_commit_repo(&e); // fake indexer has nothing to serve: it exits 1
+    let o = e.pack(&["--base", "HEAD~1"]);
+    assert_eq!(o.status.code(), Some(3));
+    let t = out(&o);
+    assert!(t.contains("Index: missing+rebuilt, 0/1 roots indexed; root . failed: exit 1") && t.contains("unknown, not unchanged"), "{t}");
+    let o = e.pack(&["--base", "HEAD~1", "--format", "json"]);
+    assert_eq!(o.status.code(), Some(3));
+    let j: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!((j["index"]["status"].as_str(), j["index"]["units"][0]["ok"].as_bool()), (Some("missing"), Some(false)));
+    assert!(j["index"]["notes"].is_array() && j["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("unknown, not unchanged")), "{j}");
+}
+
+#[test]
+fn test_DW_1_3_a_partial_index_exits_0_and_names_the_failed_unit() {
+    let e = Env::new();
+    for d in ["good", "bad"] {
+        write(e.dir(), &format!("{d}/Cargo.toml"), CARGO);
+        write(e.dir(), &format!("{d}/src/lib.rs"), LIB1);
+    }
+    commit(e.dir(), "c1");
+    for d in ["good", "bad"] {
+        write(e.dir(), &format!("{d}/src/lib.rs"), LIB2);
+    }
+    commit(e.dir(), "c2");
+    e.serve("good", &[("src/lib.rs", LIB2)]);
+    let o = e.pack(&["--base", "HEAD~1"]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert!(out(&o).contains("Index: missing+rebuilt, 1/2 roots indexed; root bad failed:"), "{}", out(&o));
+}
+
+#[test]
+fn test_DW_1_5_version_prints_the_crate_version_and_exits_0() {
+    for flag in ["--version", "-V"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_alsp")).arg(flag).output().unwrap();
+        assert_eq!(o.status.code(), Some(0));
+        assert_eq!(out(&o).trim(), format!("alsp {}", env!("CARGO_PKG_VERSION")));
+    }
 }

@@ -2,7 +2,7 @@ mod range;
 
 use crate::pack::{self, With};
 use alsp_evidence::Git;
-use alsp_review::{allowed_locations, append_findings, record_review, ReviewRecord, compose_prompt, import_gaps, mechanical_findings, merge_agent_findings, merge_findings, prove_agent_findings, render_report, run_agents, Agent, Finding};
+use alsp_review::{allowed_locations, ledger_review, record_review, Ledgered, ReviewRecord, compose_prompt, import_gaps, mechanical_findings, merge_agent_findings, merge_findings, prove_agent_findings, render_report, run_agents, Agent, Finding};
 use clap::{Args as ClapArgs, ValueEnum};
 use std::io::Write;
 use std::path::PathBuf;
@@ -78,11 +78,9 @@ pub fn run(a: Args) -> ExitCode {
     // On stderr, so stdout stays exactly the report (or the prompt, or JSON); on a terminal it is still the first line.
     eprintln!("{}", range::banner(&range, tier, &agent_names, with.contains(&With::Coverage), with.contains(&With::Gaps)));
     for skipped in &range.untracked_skipped { eprintln!("alsp: skipped untracked {skipped}"); }
-    let record = |head: &str| {
-        if a.print || !range.record { return; }
-        let rec = ReviewRecord { branch: range.branch.clone(), head: range.checked_out.clone(), reviewed: head.to_string(), uncommitted: range.uncommitted, time: String::new() };
-        if let Err(e) = record_review(&git.root, rec) { eprintln!("alsp: cannot record this review ({e}); the next ad-hoc review will start from an earlier point"); }
-    };
+    let record_of = |head: &str| (!a.print && range.record).then(|| ReviewRecord { branch: range.branch.clone(), head: range.checked_out.clone(), reviewed: head.to_string(), uncommitted: range.uncommitted, time: String::new() });
+    let warn_unrecorded = |e: std::io::Error| eprintln!("alsp: cannot record this review ({e}); the next ad-hoc review will start from an earlier point");
+    let record = |head: &str| if let Some(rec) = record_of(head) { if let Err(e) = record_review(&git.root, rec) { warn_unrecorded(e); } };
     // An ad-hoc range (no --base) that is empty ends here. An explicit --base keeps the full, empty report.
     match range.is_empty(&git) {
         Err(e) => return fail(&e),
@@ -105,7 +103,10 @@ pub fn run(a: Args) -> ExitCode {
     let mut findings=mechanical_findings(&pack,&src,base_fn);
     let allowed=allowed_locations(&pack,&src.changed_lines);
     let mut skipped=Vec::new(); let mut unparsed=Vec::new(); let mut runs=Vec::new(); let mut dropped=0; let mut split=0;
-    if !agents.is_empty() {
+    let served = pack.facts_served();
+    // Without an index the pack is empty, and an agent's findings could not be proved against it.
+    if !served { eprintln!("alsp: no index could be served; the changed symbols are unknown (see the Index line), no agents were run, and nothing was ledgered"); }
+    if served && !agents.is_empty() {
         let r=run_agents(&agents,&a.repo,&pack.head,a.prompt.as_deref(),&pack_text,&diff,Duration::from_secs(a.timeout));
         let proved=prove_agent_findings(r.findings,&allowed); dropped=proved.dropped;
         let mut symbols=std::collections::BTreeMap::new();for s in &pack.symbols{symbols.entry(s.file.clone()).or_insert_with(Vec::new).push((s.span.start,s.span.end,s.name.clone()));}
@@ -113,14 +114,19 @@ pub fn run(a: Args) -> ExitCode {
         for run in runs.iter().filter(|run|run.unparsed) { let text=unparsed.iter().find(|text|text.starts_with(&run.agent)).cloned().unwrap_or_else(||format!("{} produced no parseable result",run.agent)); findings.push(Finding::new(format!("unparsed:{}",run.agent),"(agent output)",1,"medium",text)); }
     }
     findings=merge_findings(findings);
-    if let Err(e)=append_findings(&a.repo,&pack.base,&pack.head,&findings) {return fail(&format!("cannot append review ledger: {e}"))}
-    record(&pack.head);
+    match ledger_review(&a.repo,&pack,&findings,record_of(&pack.head)) {
+        Err(e)=>return fail(&format!("cannot append review ledger: {e}")),
+        Ok(Ledgered::Written{record_error:Some(e)})=>warn_unrecorded(e),
+        Ok(_)=>{}
+    }
     let (changed_symbols,changed_symbols_more)=alsp_review::changed_symbols_json(&pack);
     let report=match a.format {
         Format::Text=>render_report(&pack,&findings,dropped,&skipped,&runs,split),
-        Format::Json=>serde_json::json!({"base":pack.base,"head":pack.head,"base_reason":range.base_reason,"uncommitted":range.uncommitted,"changed_symbols":changed_symbols,"changed_symbols_more":changed_symbols_more,"findings":findings,"agents_skipped":skipped,"agent_runs":runs,"dropped_by_proof":dropped,"unparsed":unparsed,"split_crates":split}).to_string()+"\n",
+        Format::Json=>serde_json::json!({"base":pack.base,"head":pack.head,"base_reason":range.base_reason,"uncommitted":range.uncommitted,"changed_symbols":changed_symbols,"changed_symbols_more":changed_symbols_more,"findings":findings,"agents_skipped":skipped,"agent_runs":runs,"dropped_by_proof":dropped,"unparsed":unparsed,"split_crates":split,"index":pack.index,"index_served":served,"notes":pack.notes}).to_string()+"\n",
     };
-    let _=std::io::stdout().write_all(report.as_bytes()); ExitCode::SUCCESS
+    let _=std::io::stdout().write_all(report.as_bytes());
+    // 3, as for `pack`: the symbol list is unknown, not empty.
+    if served { ExitCode::SUCCESS } else { ExitCode::from(3) }
 }
 
 pub fn import(file: PathBuf, repo: PathBuf)->Result<usize,String>{import_gaps(&repo,&file)}

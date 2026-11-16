@@ -12,6 +12,17 @@ pub const MAX_VISITED: usize = 5000;
 /// Entry points kept per symbol; the rest are counted in the pack's notes.
 pub const MAX_ENTRY_POINTS: usize = 50;
 
+/// The caveat for symbols whose [`Reach::truncated`] is set. It names the entry-point list, not
+/// the references: callers and references are read straight from the index and are not cut here.
+pub fn incomplete_entry_points_note(names: &[String]) -> String {
+    format!(
+        "the entry-point list may be incomplete for: {} (entry points were dropped past {} or the walk stopped at {} symbols); callers and references are not affected",
+        names.join(", "),
+        MAX_ENTRY_POINTS,
+        MAX_VISITED
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EntryKind {
     Test,
@@ -29,7 +40,8 @@ pub struct Graph<'a> {
 
 pub struct Reach {
     pub entry_points: Vec<Edge>,
-    /// Entry points found beyond `MAX_ENTRY_POINTS`, or the walk stopped at its limits.
+    /// Entry points were dropped (more than `MAX_ENTRY_POINTS`), or the walk stopped at its visit
+    /// limit with callers unvisited. Says nothing about references or callers, only this list.
     pub truncated: bool,
 }
 
@@ -111,6 +123,11 @@ impl<'a> Graph<'a> {
     /// Entry points (tests, `main`, `pub` functions) that can reach `start`, `start` included when
     /// it is one. Nearest first; tests before `main` before `pub` at equal distance.
     pub fn entry_points(&mut self, start: &Def) -> Reach {
+        self.entry_points_within(start, MAX_VISITED)
+    }
+
+    /// [`Graph::entry_points`] with the visit limit as a parameter, so a test can reach it.
+    fn entry_points_within(&mut self, start: &Def, max_visited: usize) -> Reach {
         let mut seen: HashSet<String> = HashSet::from([start.key.clone()]);
         let mut queue: VecDeque<(String, u32)> = VecDeque::from([(start.key.clone(), 0)]);
         let mut found: Vec<(u32, EntryKind, Edge)> = Vec::new();
@@ -125,13 +142,16 @@ impl<'a> Graph<'a> {
                 continue;
             }
             for (ck, _) in self.caller_nodes(&key) {
-                if seen.len() >= MAX_VISITED {
+                // Only a caller that would be new is lost at the limit; a revisit costs nothing.
+                if seen.contains(&ck) {
+                    continue;
+                }
+                if seen.len() >= max_visited {
                     truncated = true;
                     break;
                 }
-                if seen.insert(ck.clone()) {
-                    queue.push_back((ck, depth + 1));
-                }
+                seen.insert(ck.clone());
+                queue.push_back((ck, depth + 1));
             }
         }
         found.sort_by(|a, b| (a.0, a.1, &a.2.file, a.2.line).cmp(&(b.0, b.1, &b.2.file, b.2.line)));
@@ -263,6 +283,20 @@ mod tests {
         let r = g.entry_points(&t);
         assert_eq!(r.entry_points.len(), MAX_ENTRY_POINTS);
         assert!(r.truncated);
+    }
+
+    #[test]
+    fn a_revisit_at_the_visit_limit_is_not_a_truncation_but_an_unvisited_caller_is() {
+        // t -> a -> b -> a (cycle). Visiting {b, a} fills a limit of 2; a's caller b is a revisit.
+        let src = "fn b() {\n    a();\n}\nfn a() {\n    b();\n}\n#[test]\nfn t() {\n    a();\n}\n";
+        let (idx, mem) = setup(&[("src/lib.rs", src)]);
+        let mut g = Graph::new(&idx, &mem);
+        let b = idx.def(&id_of(&idx, "src/lib.rs", "b")).unwrap().clone();
+        let full = g.entry_points_within(&b, 3);
+        assert!(!full.truncated, "every caller fits");
+        assert_eq!(full.entry_points.len(), 1);
+        let cut = g.entry_points_within(&b, 2);
+        assert!(cut.truncated && cut.entry_points.is_empty(), "t is never reached");
     }
 
     #[test]

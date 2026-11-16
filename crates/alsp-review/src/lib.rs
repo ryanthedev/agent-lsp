@@ -567,6 +567,27 @@ pub fn append_findings(repo: &Path, base: &str, head: &str, findings: &[Finding]
     for x in findings { for source in &x.sources { let row=LedgerRow{id:x.id.clone(),time:now(),base:base.into(),head:head.into(),source:source.clone(),file:x.file.clone(),line:x.line,severity:x.severity.clone(),text:x.text.clone(),verdict:None}; writeln!(f,"{}",serde_json::to_string(&row).unwrap())?; } }
     Ok(())
 }
+/// What [`ledger_review`] did.
+#[derive(Debug)]
+pub enum Ledgered {
+    /// The pack's index could not serve, so nothing was written.
+    Skipped,
+    /// Findings were appended. `record_error` is why the review record could not be written, if it
+    /// could not (the next ad-hoc review then starts from an earlier point).
+    Written { record_error: Option<std::io::Error> },
+}
+
+/// Ledgers a finished review: appends `findings` to the findings ledger and, when `record` is given,
+/// notes the review so the next ad-hoc run starts after it. Does neither when the pack's index
+/// could not serve (`!facts_served`): such a review saw no symbols, so it must neither add rows
+/// that read as clean evidence nor move the "base = last review" mark past code nobody looked at.
+/// A failure to append findings is an error; a failure to record is reported in the result.
+pub fn ledger_review(repo:&Path,pack:&EvidencePack,findings:&[Finding],record:Option<ReviewRecord>)->std::io::Result<Ledgered>{
+    if !pack.facts_served(){return Ok(Ledgered::Skipped);}
+    append_findings(repo,&pack.base,&pack.head,findings)?;
+    let record_error=record.and_then(|rec|record_review(repo,rec).err());
+    Ok(Ledgered::Written{record_error})
+}
 /// One finished `alsp review` of the checked-out branch, so the next ad-hoc run can start where it ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRecord {
@@ -661,8 +682,14 @@ pub fn changed_symbols_json(pack:&EvidencePack)->(Vec<ChangedSymbol>,usize){
     let mut all=changed_symbols(pack);let more=all.len().saturating_sub(CHANGED_SYMBOLS_JSON_CAP);all.truncate(CHANGED_SYMBOLS_JSON_CAP);(all,more)
 }
 
+/// Pack notes the text report shows; the rest are counted, and `alsp pack` lists them all.
+const NOTES_SHOWN:usize=6;
+
 pub fn render_report(pack:&EvidencePack,findings:&[Finding],dropped:usize,skipped:&[String],runs:&[AgentRun],split_crates:usize)->String{
-    const LINE_BUDGET:usize=40+CHANGED_SYMBOLS_TEXT_CAP+2; let mut out=vec![format!("Review {}..{}",escape(&pack.base),escape(&pack.head))];
+    const LINE_BUDGET:usize=40+CHANGED_SYMBOLS_TEXT_CAP+2+1+NOTES_SHOWN+1; let mut out=vec![format!("Review {}..{}",escape(&pack.base),escape(&pack.head))];
+    if !pack.index_is_clean(){out.push(pack.index_line());}
+    out.extend(pack.notes.iter().take(NOTES_SHOWN).map(|n|format!("! {}",cap_text(n,300))));
+    if pack.notes.len()>NOTES_SHOWN{out.push(format!("+{} more notes (alsp pack --base {})",pack.notes.len()-NOTES_SHOWN,escape(&pack.base)));}
     let mut agent:Vec<_>=findings.iter().filter(|f|f.sources.iter().any(|s|matches!(s.as_str(),"claude"|"codex"|"agy"))).collect();
     agent.sort_by(|a,b|severity_rank(&b.severity).cmp(&severity_rank(&a.severity)).then_with(||(&a.file,a.line).cmp(&(&b.file,b.line))));
     let mech:Vec<_>=findings.iter().filter(|f|f.sources.iter().any(|s|matches!(s.as_str(),"coverage"|"heuristic"))).collect();
@@ -670,7 +697,7 @@ pub fn render_report(pack:&EvidencePack,findings:&[Finding],dropped:usize,skippe
     let agent_budget=16; for f in agent.iter().take(agent_budget){out.push(format!("{} {}:{} [{}] {} — {}",f.id,escape(&f.file),f.line,escape(&f.severity),f.sources.join(","),cap_text(&f.text,220)));}
     if agent.len()>agent_budget{out.push(format!("+{} more (alsp ledger list)",agent.len()-agent_budget));}
     let changed=changed_symbols(pack);
-    out.push(if changed.is_empty(){"Changed symbols: none".into()}else{"Changed symbols (pass the name, or file:line, to alsp cover / alsp gaps):".into()});
+    out.push(if !pack.facts_served(){"Changed symbols: unknown (no index could be served; unknown, not unchanged)".into()}else if changed.is_empty(){"Changed symbols: none".into()}else{"Changed symbols (pass the name, or file:line, to alsp cover / alsp gaps):".into()});
     for c in changed.iter().take(CHANGED_SYMBOLS_TEXT_CAP){out.push(format!("{} {} {}:{}-{}",c.change,escape(&c.name),escape(&c.file),c.line,c.end_line));}
     if changed.len()>CHANGED_SYMBOLS_TEXT_CAP{out.push(format!("+{} more (alsp pack --base {})",changed.len()-CHANGED_SYMBOLS_TEXT_CAP,escape(&pack.base)));}
     out.push("Mechanical findings:".into());
@@ -775,7 +802,7 @@ mod tests {
     fn report_pack() -> EvidencePack {
         use alsp_evidence::{Coverage, EvidencePack, GapReason, PredictedGap, SymbolEvidence};
         use alsp_index::{IndexState, IndexStatus, Span};
-        EvidencePack {base:"b".into(),head:"h".into(),index:IndexState{status:IndexStatus::Fresh,rebuilt:false,units:vec![],millis:0},symbols:vec![SymbolEvidence{id:"f".into(),name:"f".into(),file:"a.rs".into(),span:Span{start:1,end:4},kind:ChangeKind::Modified,callers:vec![],entry_points:vec![],coverage:Some(Coverage{lines_total:4,lines_hit:3,branches_total:None,branches_hit:None,uncovered_changed_lines:vec![2]}),gaps:vec![PredictedGap{file:"a.rs".into(),line:3,mutation:"mutant 1".into(),p_tests_catch:0.1,reason:GapReason::PredictedSurvivor}]}],notes:vec![]}
+        EvidencePack {base:"b".into(),head:"h".into(),index:IndexState{status:IndexStatus::Fresh,rebuilt:false,units:vec![alsp_index::UnitReport{path:".".into(),ok:true,detail:None}],millis:0, notes: vec![] },symbols:vec![SymbolEvidence{id:"f".into(),name:"f".into(),file:"a.rs".into(),span:Span{start:1,end:4},kind:ChangeKind::Modified,callers:vec![],entry_points:vec![],coverage:Some(Coverage{lines_total:4,lines_hit:3,branches_total:None,branches_hit:None,uncovered_changed_lines:vec![2]}),gaps:vec![PredictedGap{file:"a.rs".into(),line:3,mutation:"mutant 1".into(),p_tests_catch:0.1,reason:GapReason::PredictedSurvivor}]}],notes:vec![]}
     }
 
     #[test]
@@ -798,7 +825,7 @@ mod tests {
         use alsp_evidence::{Coverage, EvidencePack, GapReason, PredictedGap, SymbolEvidence};
         use alsp_index::{IndexState, IndexStatus, Span};
         let root=tempfile::tempdir().unwrap(); std::fs::write(root.path().join("a.rs"),"fn f(x: u8) {}\n").unwrap();
-        let mut p=EvidencePack {base:"b".into(),head:"h".into(),index:IndexState{status:IndexStatus::Fresh,rebuilt:false,units:vec![],millis:0},symbols:vec![],notes:vec![]};
+        let mut p=EvidencePack {base:"b".into(),head:"h".into(),index:IndexState{status:IndexStatus::Fresh,rebuilt:false,units:vec![alsp_index::UnitReport{path:".".into(),ok:true,detail:None}],millis:0, notes: vec![] },symbols:vec![],notes:vec![]};
         let mut s=SymbolEvidence{id:"f".into(),name:"f".into(),file:"a.rs".into(),span:Span{start:1,end:1},kind:ChangeKind::Modified,callers:vec![],entry_points:vec![],coverage:Some(Coverage{lines_total:1,lines_hit:0,branches_total:None,branches_hit:None,uncovered_changed_lines:vec![1]}),gaps:vec![PredictedGap{file:"a.rs".into(),line:1,mutation:"x".into(),p_tests_catch:0.2,reason:GapReason::PredictedSurvivor},PredictedGap{file:"a.rs".into(),line:1,mutation:"y".into(),p_tests_catch:0.9,reason:GapReason::Uncovered}]};
         p.symbols.push(s.clone()); let src=PackSource{tree:root.path().into(),cache_dir:PathBuf::new(),build_env:vec![],changed_lines:BTreeMap::from([("a.rs".into(),vec![1])])};
         let findings=mechanical_findings(&p,&src, |_|None); assert_eq!(findings.len(),3); assert!(findings.iter().any(|f|f.sources==["coverage"]));
@@ -810,7 +837,7 @@ mod tests {
         use alsp_evidence::{EvidencePack, Edge, Provenance, SymbolEvidence};
         use alsp_index::{IndexState, IndexStatus, Span};
         let root=tempfile::tempdir().unwrap(); std::fs::write(root.path().join("a.rs"),"fn f(x: u16) {}\nfn caller() { f(1); }\n").unwrap();
-        let p=EvidencePack{base:"b".into(),head:"h".into(),index:IndexState{status:IndexStatus::Fresh,rebuilt:false,units:vec![],millis:0},symbols:vec![SymbolEvidence{id:"f".into(),name:"crate::f".into(),file:"a.rs".into(),span:Span{start:1,end:1},kind:ChangeKind::Modified,callers:vec![Edge{id:"caller".into(),file:"a.rs".into(),line:2,provenance:Provenance::Resolved}],entry_points:vec![],coverage:None,gaps:vec![]}],notes:vec![]};
+        let p=EvidencePack{base:"b".into(),head:"h".into(),index:IndexState{status:IndexStatus::Fresh,rebuilt:false,units:vec![alsp_index::UnitReport{path:".".into(),ok:true,detail:None}],millis:0, notes: vec![] },symbols:vec![SymbolEvidence{id:"f".into(),name:"crate::f".into(),file:"a.rs".into(),span:Span{start:1,end:1},kind:ChangeKind::Modified,callers:vec![Edge{id:"caller".into(),file:"a.rs".into(),line:2,provenance:Provenance::Resolved}],entry_points:vec![],coverage:None,gaps:vec![]}],notes:vec![]};
         let src=PackSource{tree:root.path().into(),cache_dir:PathBuf::new(),build_env:vec![],changed_lines:BTreeMap::from([("a.rs".into(),vec![1])])};
         let f=mechanical_findings(&p,&src, |_|Some("fn f(x: u8) {}\nfn caller() { f(1); }\n".into()));
         assert_eq!(f.len(),1); assert_eq!(f[0].sources,["heuristic"]); assert!(f[0].text.contains("signature changed"));
@@ -1310,6 +1337,60 @@ mod tests {
         record_review(d.path(), rec("main", "a")).unwrap();
         std::fs::OpenOptions::new().append(true).open(d.path().join(".alsp/reviews.jsonl")).unwrap().write_all(b"{torn\nnot json\n").unwrap();
         assert_eq!(last_review(d.path(), "main").unwrap().unwrap().head, "a");
+    }
+
+    fn no_index_pack() -> EvidencePack {
+        let mut p = report_pack();
+        p.symbols.clear();
+        p.index.status = alsp_index::IndexStatus::Missing;
+        p.index.units = vec![alsp_index::UnitReport { path: ".".into(), ok: false, detail: Some("rust-analyzer not found".into()) }];
+        p.index.notes = vec!["tried /x/ra".into()];
+        p.notes = vec!["no index could be served, so no symbols are reported (an empty list here means unknown, not unchanged)".into()];
+        p
+    }
+
+    #[test]
+    fn test_DW_1_6_a_no_index_review_writes_neither_the_findings_ledger_nor_the_review_record() {
+        let d = tempfile::tempdir().unwrap();
+        let f = vec![Finding::new("coverage", "a.rs", 2, "medium", "changed line is uncovered")];
+        assert!(matches!(ledger_review(d.path(), &no_index_pack(), &f, Some(rec("main", "a"))).unwrap(), Ledgered::Skipped));
+        assert!(!d.path().join(".alsp").exists(), "nothing was written, not even the directory");
+        assert_eq!(last_review(d.path(), "main").unwrap(), None);
+        // the same call with a servable index writes both
+        assert!(matches!(ledger_review(d.path(), &report_pack(), &f, Some(rec("main", "a"))).unwrap(), Ledgered::Written { record_error: None }));
+        assert_eq!(read_rows(&ledger_path(d.path())).unwrap().len(), 1);
+        assert_eq!(last_review(d.path(), "main").unwrap().unwrap().head, "a");
+        // no record requested (--print, or a range that is not recorded): findings only
+        let e = tempfile::tempdir().unwrap();
+        assert!(matches!(ledger_review(e.path(), &report_pack(), &f, None).unwrap(), Ledgered::Written { record_error: None }));
+        assert_eq!(last_review(e.path(), "main").unwrap(), None);
+    }
+
+    #[test]
+    fn test_DW_1_1_report_without_an_index_says_unknown_and_shows_the_index_line_and_notes() {
+        let r = render_report(&no_index_pack(), &[], 0, &[], &[], 0);
+        assert!(r.contains("Index: missing, 0/1 roots indexed; root . failed: rust-analyzer not found; tried /x/ra\n"), "{r}");
+        assert!(r.contains("unknown, not unchanged"), "{r}");
+        assert!(r.contains("Changed symbols: unknown") && !r.contains("Changed symbols: none"), "{r}");
+    }
+
+    #[test]
+    fn test_DW_1_2_report_with_a_good_index_and_no_changes_says_none_and_adds_no_index_line() {
+        let mut p = report_pack();
+        p.symbols.clear();
+        let r = render_report(&p, &[], 0, &[], &[], 0);
+        assert!(r.contains("Changed symbols: none") && !r.contains("Index:"), "{r}");
+    }
+
+    #[test]
+    fn report_shows_a_partial_index_and_caps_pack_notes() {
+        let mut p = report_pack();
+        p.index.units.push(alsp_index::UnitReport { path: "bad".into(), ok: false, detail: Some("exit 1".into()) });
+        p.notes = (0..9).map(|i| format!("note {i}")).collect();
+        let r = render_report(&p, &[], 0, &[], &[], 0);
+        assert!(r.contains("Index: fresh, 1/2 roots indexed; root bad failed: exit 1"), "{r}");
+        assert!(r.contains("! note 5\n") && !r.contains("! note 6") && r.contains("+3 more notes"), "{r}");
+        assert!(r.contains("Changed symbols (pass"), "a partial index still reports its symbols: {r}");
     }
 
     #[test]

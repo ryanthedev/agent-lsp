@@ -9,7 +9,7 @@ mod review;
 mod settings;
 
 #[derive(Parser)]
-#[command(name = "alsp", about = "Evidence layer for code review agents; `alsp` alone prints the agent cheat sheet", disable_help_subcommand = true)]
+#[command(name = "alsp", version, about = "Evidence layer for code review agents; `alsp` alone prints the agent cheat sheet", disable_help_subcommand = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

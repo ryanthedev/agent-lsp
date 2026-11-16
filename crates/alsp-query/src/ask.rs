@@ -65,7 +65,7 @@ impl Workspace {
             }
         }
         if !truncated.is_empty() {
-            a.notes.push(format!("the entry-point search hit its limit for {}: the list may be incomplete", truncated.join(", ")));
+            a.notes.push(alsp_evidence::incomplete_entry_points_note(&truncated));
         }
         out
     }

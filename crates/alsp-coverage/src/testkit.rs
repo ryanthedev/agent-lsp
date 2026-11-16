@@ -144,7 +144,7 @@ pub fn pack(symbols: Vec<SymbolEvidence>) -> EvidencePack {
     EvidencePack {
         base: "b".into(),
         head: "h".into(),
-        index: IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 0 },
+        index: IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 0, notes: vec![] },
         symbols,
         notes: vec![],
     }

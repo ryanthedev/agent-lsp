@@ -66,11 +66,16 @@ pub struct IndexState {
     pub rebuilt: bool,
     pub units: Vec<UnitReport>,
     pub millis: u64,
+    /// Caveats about how the index was (or could not be) obtained, e.g. which rust-analyzer was
+    /// tried. Rendered next to the status by `alsp pack` and `alsp review`; rows written before
+    /// this field existed read as empty.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 impl IndexState {
     pub fn skipped() -> Self {
-        IndexState { status: IndexStatus::Skipped, rebuilt: false, units: Vec::new(), millis: 0 }
+        IndexState { status: IndexStatus::Skipped, rebuilt: false, units: Vec::new(), millis: 0, notes: Vec::new() }
     }
     /// Every root is in the index.
     pub fn complete(&self) -> bool {
@@ -250,7 +255,7 @@ pub fn open_index_with(req: &IndexRequest, extra_roots: &[PathBuf]) -> Result<Op
             })
             .collect();
         return Ok(OpenedIndex {
-            state: IndexState { status, rebuilt: false, units, millis: started.elapsed().as_millis() as u64 },
+            state: IndexState { status, rebuilt: false, units, millis: started.elapsed().as_millis() as u64, notes: Vec::new() },
             index: None,
         });
     }
@@ -292,7 +297,7 @@ pub fn open_index_with(req: &IndexRequest, extra_roots: &[PathBuf]) -> Result<Op
     }
     let index = (!parsed.is_empty()).then(|| scip_read::merge(parsed));
     Ok(OpenedIndex {
-        state: IndexState { status, rebuilt, units: reports, millis: started.elapsed().as_millis() as u64 },
+        state: IndexState { status, rebuilt, units: reports, millis: started.elapsed().as_millis() as u64, notes: Vec::new() },
         index,
     })
 }

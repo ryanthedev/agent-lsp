@@ -22,7 +22,7 @@ mod types;
 pub mod testkit;
 
 pub use changed::Sources;
-pub use graph::{Graph, Reach};
+pub use graph::{incomplete_entry_points_note, Graph, Reach};
 pub use render::{approx_tokens, escape, CALLERS_SHOWN, ENTRY_POINTS_SHOWN, GAPS_SHOWN};
 pub use types::*;
 
@@ -161,13 +161,7 @@ fn assemble(base: String, head: String, diffs: &[diff::FileDiff], index: IndexSt
     }
     pack.symbols.sort_by(|a, b| (&a.file, a.span.start, &a.id).cmp(&(&b.file, b.span.start, &b.id)));
     if !truncated.is_empty() {
-        pack.notes.push(format!(
-            "entry-point search hit its limit (depth {}, {} symbols, {} results) for: {}",
-            graph::MAX_DEPTH,
-            graph::MAX_VISITED,
-            graph::MAX_ENTRY_POINTS,
-            truncated.join(", ")
-        ));
+        pack.notes.push(graph::incomplete_entry_points_note(&truncated));
     }
     if !trait_impls.is_empty() {
         pack.notes.push(format!("trait impl methods: calls made through the trait are not attributed to the impl: {}", trait_impls.join(", ")));
@@ -291,7 +285,7 @@ mod tests {
         }
     }
     fn state() -> IndexState {
-        IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 0 }
+        IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 0, notes: vec![] }
     }
 
     const LIB: &str = "pub fn api() {\n    helper();\n}\nfn helper() {\n    1;\n}\n";
@@ -366,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_entry_point_search_is_noted() {
+    fn test_DW_1_4_truncated_entry_point_list_is_noted() {
         let mut s = String::from("fn target() {\n    1;\n}\n");
         for i in 0..(graph::MAX_ENTRY_POINTS + 2) {
             s.push_str(&format!("#[test]\nfn t{i:03}() {{\n    target();\n}}\n"));
@@ -375,7 +369,17 @@ mod tests {
         let idx = index_for(&[("src/lib.rs", &s)]);
         let p = assemble("b".into(), "h".into(), &[modified("src/lib.rs", (2, 2))], state(), Some(&idx), &src);
         assert_eq!(p.symbols[0].entry_points.len(), graph::MAX_ENTRY_POINTS);
-        assert!(p.notes.iter().any(|n| n.contains("entry-point search hit its limit") && n.contains("lib::target")));
+        assert!(p.notes.iter().any(|n| n.contains("entry-point list may be incomplete") && n.contains("lib::target") && n.contains("references are not affected")));
+    }
+
+    #[test]
+    fn test_DW_1_4_no_entry_point_note_when_nothing_was_dropped() {
+        let s = "fn target() {\n    1;\n}\n#[test]\nfn t() {\n    target();\n}\n";
+        let src = mem(&[("src/lib.rs", s)], &[("src/lib.rs", s)]);
+        let idx = index_for(&[("src/lib.rs", s)]);
+        let p = assemble("b".into(), "h".into(), &[modified("src/lib.rs", (2, 2))], state(), Some(&idx), &src);
+        assert_eq!(p.symbols[0].entry_points.len(), 1);
+        assert!(!p.notes.iter().any(|n| n.contains("entry-point")), "{:?}", p.notes);
     }
 
     #[test]

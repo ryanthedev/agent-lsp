@@ -106,7 +106,7 @@ impl Workspace {
     /// A workspace over an index the caller already holds (`tree` is its canonical root). Reports a
     /// fresh, fully built index of an unknown commit; [`Workspace::open`] sets the real state.
     pub fn new(tree: PathBuf, cache_dir: PathBuf, index: SymbolIndex) -> Workspace {
-        let state = IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 0 };
+        let state = IndexState { status: IndexStatus::Fresh, rebuilt: false, units: vec![UnitReport { path: ".".into(), ok: true, detail: None }], millis: 0, notes: vec![] };
         Workspace {
             tree,
             cache_dir,

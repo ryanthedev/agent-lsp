@@ -103,7 +103,7 @@ Text: `no match for ...` followed by `nearest:`, or `... is ambiguous: N candida
 |---|---|
 | 0 | Answered. |
 | 2 | Usage error, not a git work tree, no `Cargo.toml`, or another failure; stderr says what to do. |
-| 3 | No index could be served: `--no-build` with a stale or missing cache, or every Cargo root failed to index (as for `alsp pack`). |
+| 3 | No index could be served: `--no-build` with a stale or missing cache, or every Cargo root failed to index. `alsp pack` and `alsp review` use it too: they still print what they have, an `Index:` line (status, each failed root and why, the indexer's notes) and a note that an empty symbol list means unknown, not unchanged. A partial index (some roots failed) exits 0 and names the failed roots in the `Index:` line. |
 | 4 | The target matches nothing, or `refs`, `tests`, `cover` or `gaps` got an ambiguous name. Candidates or nearest names are on stdout. |
 | 5 | A measurement the question needs could not be made (tests failed, `cargo-llvm-cov` missing, mutants not listable, sdd `decide` unavailable). The answer is still printed, with the cause in its notes and `unavailable`. |
 

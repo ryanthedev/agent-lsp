@@ -382,8 +382,8 @@ fn open_errors_say_what_to_do_next() {
     let missing = Workspace::open(&OpenOptions { repo: not_git.path().join("nope"), no_build: true, cache_root: None, tool: Tool::default(), extra_roots: vec![] }).err().unwrap();
     assert!(missing.to_string().contains("does not exist"), "{missing}");
     let unit = |ok, d: Option<&str>| UnitReport { path: "crates/x".into(), ok, detail: d.map(String::from) };
-    let state = |status, units| IndexState { status, rebuilt: false, units, millis: 0 };
-    let ran = |units| IndexState { status: IndexStatus::Missing, rebuilt: true, units, millis: 0 };
+    let state = |status, units| IndexState { status, rebuilt: false, units, millis: 0, notes: vec![] };
+    let ran = |units| IndexState { status: IndexStatus::Missing, rebuilt: true, units, millis: 0, notes: vec![] };
     let stale = OpenError::Unavailable(state(IndexStatus::Stale, vec![unit(false, Some("cached; not rebuilt because the indexer is disabled"))])).to_string();
     assert!(stale.contains("index stale") && stale.contains("rerun without --no-build"), "{stale}");
     let broken = OpenError::Unavailable(state(IndexStatus::Missing, vec![unit(false, None)])).to_string();
