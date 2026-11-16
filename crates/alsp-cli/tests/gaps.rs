@@ -3,7 +3,7 @@
 //! `llvm-cov` and `mutants --list` (alsp-coverage's testkit), and a fake `bun` + sdd tree standing in for sdd's `decide` command.
 #![allow(non_snake_case)]
 
-use alsp_coverage::testkit::{install_fake_cargo, lcov, metadata_json};
+use alsp_coverage::testkit::{install_fake_cargo, lcov, libtest_failures, metadata_json};
 use alsp_decide::stub::FakeSdd;
 use alsp_evidence::testkit::scip_for;
 use std::fs;
@@ -113,6 +113,18 @@ fn test_DW_3_2_pack_with_coverage_and_gaps_shows_lines_gaps_and_the_spend_and_on
     assert!(err(&o).contains("3000 input tokens, $0.0003"), "{}", err(&o));
     // the reaching test, found through the index, was sent
     assert!(stub.request(1).contains("fn t_a()"));
+}
+
+#[test]
+fn pack_with_coverage_shows_the_failing_tests_note_and_keeps_the_coverage() {
+    let e = Env::new(LIB2, &[]);
+    fs::write(e.fx.join("stdout.txt"), libtest_failures(&["it::t_a"], "boom")).unwrap();
+    let o = e.pack(&["--base", "HEAD~1", "--with", "coverage"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let t = out(&o);
+    assert!(t.contains("  lines 4/4 covered, branches 1/2\n"), "{t}");
+    assert!(t.contains("! coverage for package fx was observed, but 1 test failed: it::t_a"), "{t}");
+    assert!(err(&o).contains("coverage fx: measured, but some tests failed"), "{}", err(&o));
 }
 
 #[test]

@@ -71,7 +71,7 @@ pub(crate) fn unit_interval(s: &str) -> Result<f64, String> {
 fn report_coverage(obs: &Observed) {
     for r in obs.runs() {
         match &r.error {
-            None => eprintln!("alsp: coverage {}: {} in {:.1}s", r.package, if r.cached { "cached" } else { "measured" }, r.millis as f64 / 1000.0),
+            None => eprintln!("alsp: coverage {}: {} in {:.1}s", r.package, if r.degraded { "measured, but some tests failed (see the pack's notes)" } else if r.cached { "cached" } else { "measured" }, r.millis as f64 / 1000.0),
             Some(_) => eprintln!("alsp: coverage {}: unavailable after {:.1}s (see the pack's notes)", r.package, r.millis as f64 / 1000.0),
         }
     }

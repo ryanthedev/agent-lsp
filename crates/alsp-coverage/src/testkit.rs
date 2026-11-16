@@ -19,11 +19,19 @@ case "$1" in
       if [ -f "$ALSP_FX/no_llvm_cov" ]; then echo "error: no such command: llvm-cov" >&2; exit 101; fi
       echo "cargo-llvm-cov 9.9.9"; exit 0
     fi
+    case "$*" in *--ignore-run-fail*) if [ -f "$ALSP_FX/no_ignore_run_fail" ]; then echo "error: invalid option '--ignore-run-fail'" >&2; exit 1; fi ;; esac
     case "$*" in *--branch*) if [ -f "$ALSP_FX/no_branch" ]; then echo "error: --branch requires nightly compiler" >&2; exit 1; fi ;; esac
-    if [ -f "$ALSP_FX/fail" ]; then echo "test t::bad ... FAILED" >&2; echo "error: test failed, to rerun pass --lib" >&2; exit 101; fi
+    if [ -f "$ALSP_FX/compile_fail" ]; then
+      i=0; while [ $i -lt 60 ]; do echo "   Compiling noise-crate-$i v0.1.0 (/some/long/path/to/a/workspace/member)" >&2; i=$((i+1)); done
+      echo "error[E0425]: cannot find value \`zzz\` in this scope" >&2
+      echo "error: could not compile \`fx\` (lib) due to 1 previous error" >&2; exit 101
+    fi
+    if [ -f "$ALSP_FX/fail" ]; then if [ -f "$ALSP_FX/stdout.txt" ]; then cat "$ALSP_FX/stdout.txt"; fi; echo "test t::bad ... FAILED" >&2; echo "error: test failed, to rerun pass --lib" >&2; exit 101; fi
     if [ -f "$ALSP_FX/lock_wait" ]; then echo "    Blocking waiting for file lock on build directory" >&2; sleep 0.3; fi
     while [ $# -gt 0 ]; do [ "$1" = --output-path ] && out="$2"; shift; done
-    sed "s#@TREE@#$ALSP_TREE#g" "$ALSP_FX/out.lcov" > "$out" ;;
+    sed "s#@TREE@#$ALSP_TREE#g" "$ALSP_FX/out.lcov" > "$out"
+    # libtest's report of failing tests goes to stdout; with --ignore-run-fail the exit status stays 0
+    if [ -f "$ALSP_FX/stdout.txt" ]; then cat "$ALSP_FX/stdout.txt"; fi ;;
 esac
 "#;
 
@@ -81,7 +89,14 @@ impl Fx {
         std::fs::write(self.fx.join("mutants.json"), json).unwrap();
     }
 
-    /// Switch a fake behaviour on: `fail`, `no_branch`, `no_llvm_cov`, `lock_wait`, `mutants.fail`.
+    /// Make the fake `llvm-cov` print `text` on stdout after writing the report (see [`libtest_failures`]).
+    pub fn set_test_output(&self, text: &str) {
+        std::fs::write(self.fx.join("stdout.txt"), text).unwrap();
+    }
+
+    /// Switch a fake behaviour on: `fail` (crash, exit 101, no report), `compile_fail` (1.5 KB+ of
+    /// build noise, then a compile error, exit 101), `no_ignore_run_fail` (rejects that argument as
+    /// an older cargo-llvm-cov would), `no_branch`, `no_llvm_cov`, `lock_wait`, `mutants.fail`.
     pub fn flag(&self, name: &str, on: bool) {
         let p = self.fx.join(name);
         if on {
@@ -105,6 +120,25 @@ fn write(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, body).unwrap();
+}
+
+/// What libtest prints on stdout when `names` fail, each panicking with `panic` (rustc's current
+/// layout: the message is on the line after `panicked at <location>:`).
+pub fn libtest_failures(names: &[&str], panic: &str) -> String {
+    let mut s = format!("running {} tests\n", names.len());
+    for n in names {
+        s.push_str(&format!("test {n} ... FAILED\n"));
+    }
+    s.push_str("\nfailures:\n\n");
+    for n in names {
+        s.push_str(&format!("---- {n} stdout ----\n\nthread '{n}' (1) panicked at src/lib.rs:3:5:\n{panic}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n"));
+    }
+    s.push_str("failures:\n");
+    for n in names {
+        s.push_str(&format!("    {n}\n"));
+    }
+    s.push_str(&format!("\ntest result: FAILED. 0 passed; {} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n", names.len()));
+    s
 }
 
 /// lcov text for `(file, [(line, count)], [(line, [branch taken])])`, paths under the fixture tree.

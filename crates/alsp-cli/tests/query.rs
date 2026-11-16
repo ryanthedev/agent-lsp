@@ -3,7 +3,7 @@
 //! listing (alsp-coverage's testkit), and a fake sdd `decide` command (alsp_decide::stub::FakeSdd).
 #![allow(non_snake_case)]
 
-use alsp_coverage::testkit::{install_fake_cargo, lcov, metadata_json};
+use alsp_coverage::testkit::{install_fake_cargo, lcov, libtest_failures, metadata_json};
 use alsp_decide::stub::FakeSdd;
 use alsp_evidence::testkit::{scip_for, trait_fixture_scip, TRAIT_LIB};
 use std::fs;
@@ -322,6 +322,39 @@ fn cover_reports_coverage_and_exits_5_when_the_tests_cannot_run() {
     assert_eq!(o.status.code(), Some(5), "{}", err(&o));
     assert!(out(&o).contains("! coverage unavailable for package fx") && out(&o).contains("! unavailable: coverage could not be measured"), "{}", out(&o));
     assert!(err(&o).contains("fix the cause and rerun"), "{}", err(&o));
+}
+
+#[test]
+fn test_DW_1_6_cover_shows_the_failing_tests_note_and_exits_0() {
+    let e = Env::new(LIB, &[]);
+    fs::write(e.fx.join("stdout.txt"), libtest_failures(&["it::t_leaf"], "TMPDIR_FOR_TESTS is not set")).unwrap();
+    let o = e.run(&["cover", "leaf"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let t = out(&o);
+    assert!(t.contains("lines 1/3 covered, branches 1/2 [observed]\nuncovered: 9-10 [observed]\n"), "{t}");
+    assert!(t.contains("! coverage for package fx was observed, but 1 test failed: it::t_leaf - first panic: `TMPDIR_FOR_TESTS is not set (at src/lib.rs:3:5)`;"), "{t}");
+    assert!(!t.contains("unavailable"), "{t}");
+    assert!(err(&o).contains("coverage fx: measured, but some tests failed"), "{}", err(&o));
+    let j = json(&e.run(&["cover", "leaf", "--json"], None));
+    assert!(j["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("1 test failed: it::t_leaf")), "{j}");
+    assert!(j.get("unavailable").is_none_or(|u| u.is_null()), "{j}");
+    // the environment is fixed: the next run measures afresh and says nothing
+    fs::remove_file(e.fx.join("stdout.txt")).unwrap();
+    let o = e.run(&["cover", "leaf"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert!(!out(&o).contains("test failed") && !out(&o).contains("! coverage for package"), "{}", out(&o));
+}
+
+#[test]
+fn test_DW_1_7_gaps_shows_the_failing_tests_note() {
+    let e = Env::new(LIB, &[]);
+    fs::write(e.fx.join("stdout.txt"), libtest_failures(&["it::t_leaf", "it::t_api"], "boom")).unwrap();
+    let stub = { let f = FakeSdd::new("ok"); f.p(0.2); f.tokens(1500); f };
+    let o = e.run(&["gaps", "leaf"], Some(&stub));
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let t = out(&o);
+    assert!(t.contains("! coverage for package fx was observed, but 2 tests failed: it::t_leaf, it::t_api - first panic: `boom (at src/lib.rs:3:5)`;"), "{t}");
+    assert!(t.contains("uncovered [observed]"), "coverage still drives the unrun-mutant gaps: {t}");
 }
 
 #[test]

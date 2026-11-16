@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use crate::testkit::{lcov, pack, sym, Fx};
+use crate::testkit::{libtest_failures, lcov, pack, sym, Fx};
 use crate::*;
 use alsp_evidence::ChangeKind::{Added, Modified, Removed};
 
@@ -65,21 +65,177 @@ fn a_cached_report_is_reused_until_the_workspace_content_changes() {
     assert!(!observe(&p, &fx.src, &tool).runs()[0].cached && runs(&fx) == 2, "a source change is a new hash");
 }
 
+fn runs_of(fx: &Fx) -> Vec<String> {
+    fx.calls().into_iter().filter(|c| c.starts_with("llvm-cov --lcov")).collect()
+}
+
+fn tool(fx: &Fx) -> CoverageTool {
+    CoverageTool { program: fx.cargo.clone(), ..Default::default() }
+}
+
 #[test]
-fn test_DW_3_5_a_failing_test_run_is_unavailable_with_the_reason_not_zero_and_is_not_cached() {
+fn a_crashed_coverage_run_is_unavailable_with_the_reason_not_zero_and_is_not_cached() {
     let fx = fx();
     fx.flag("fail", true);
     let mut p = pack(symbols());
-    let tool = CoverageTool { program: fx.cargo.clone(), ..Default::default() };
-    let obs = observe(&p, &fx.src, &tool);
+    let obs = observe(&p, &fx.src, &tool(&fx));
     obs.attach(&mut p, &fx.src);
     assert!(p.symbols.iter().all(|s| s.coverage.is_none()));
     let note = p.notes.iter().find(|n| n.starts_with("coverage unavailable for package fx")).expect("a note");
     assert!(note.contains("exited 101") && note.contains("test t::bad ... FAILED"), "{note}");
     assert_eq!(obs.lines_status("src/lib.rs", 1, 7), Hit::Unknown);
-    assert!(obs.runs()[0].error.is_some());
+    assert!(obs.runs()[0].error.is_some() && !obs.runs()[0].degraded);
     fx.flag("fail", false);
-    assert!(observe(&p, &fx.src, &tool).runs()[0].error.is_none(), "the failure was not remembered");
+    assert!(observe(&p, &fx.src, &tool(&fx)).runs()[0].error.is_none(), "the failure was not remembered");
+}
+
+#[test]
+fn test_DW_1_1_failing_tests_keep_coverage_and_name_the_failures() {
+    let fx = fx();
+    fx.set_test_output(&libtest_failures(&["a::b", "c::d"], "assertion failed: env var X is set"));
+    let mut p = pack(symbols());
+    let obs = observe(&p, &fx.src, &tool(&fx));
+    obs.attach(&mut p, &fx.src);
+    let a = p.symbols[0].coverage.as_ref().expect("coverage is kept");
+    assert_eq!((a.lines_total, a.lines_hit, a.branches_total), (4, 3, Some(2)));
+    assert_eq!(obs.lines_status("src/lib.rs", 1, 7), Hit::Yes);
+    assert!(obs.runs()[0].error.is_none() && obs.runs()[0].degraded && !obs.runs()[0].cached);
+    let note = p.notes.iter().find(|n| n.contains("package fx")).expect("a note");
+    assert!(note.contains("2 tests failed: a::b, c::d"), "{note}");
+    assert!(note.contains("first panic: `assertion failed: env var X is set (at src/lib.rs:3:5)`"), "{note}");
+    assert!(note.contains("under-counted") && note.contains("environment variable") && note.contains("rerun"), "{note}");
+    assert!(!note.contains("unavailable"), "{note}");
+    // 0.9.1: --ignore-run-fail alone keeps the other test binaries running; --no-fail-fast is not passed
+    let run = &runs_of(&fx)[0];
+    assert!(run.contains("--ignore-run-fail") && !run.contains("--no-fail-fast") && run.contains("--branch"), "{run}");
+}
+
+#[test]
+fn a_single_failure_and_an_old_style_panic_line_are_read() {
+    let fx = fx();
+    fx.set_test_output("test only::one ... FAILED\n\nfailures:\n\n---- only::one stdout ----\nthread 'only::one' panicked at 'boom', src/x.rs:1:1\n\nfailures:\n    only::one\n");
+    let obs = observe(&pack(symbols()), &fx.src, &tool(&fx));
+    let n = &obs.notes()[0];
+    assert!(n.contains("1 test failed: only::one") && n.contains("first panic: `'boom', src/x.rs:1:1`"), "{n}");
+}
+
+#[test]
+fn test_DW_1_2_note_lists_five_names_then_and_n_more() {
+    let fx = fx();
+    let names: Vec<String> = (1..=7).map(|i| format!("t::n{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    fx.set_test_output(&libtest_failures(&refs, "x"));
+    let obs = observe(&pack(symbols()), &fx.src, &tool(&fx));
+    let n = &obs.notes()[0];
+    assert!(n.contains("7 tests failed: t::n1, t::n2, t::n3, t::n4, t::n5 and 2 more"), "{n}");
+    assert!(!n.contains("t::n6") && !n.contains("t::n7"), "{n}");
+}
+
+#[test]
+fn test_DW_1_2_failure_evidence_without_names_says_names_not_parsed() {
+    let fx = fx();
+    fx.set_test_output("running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored\n");
+    let obs = observe(&pack(symbols()), &fx.src, &tool(&fx));
+    assert!(obs.runs()[0].degraded);
+    assert!(obs.notes()[0].contains("some tests failed (names not parsed)") && !obs.notes()[0].contains("first panic"), "{:?}", obs.notes());
+}
+
+#[test]
+fn test_DW_1_2_all_passing_has_no_note_and_is_cached() {
+    let fx = fx();
+    fx.set_test_output("running 2 tests\ntest a ... ok\ntest b ... ignored\n\ntest result: ok. 1 passed; 0 failed; 1 ignored\n");
+    let obs = observe(&pack(symbols()), &fx.src, &tool(&fx));
+    assert!(obs.notes().is_empty() && !obs.runs()[0].degraded, "{:?}", obs.notes());
+    assert!(observe(&pack(symbols()), &fx.src, &tool(&fx)).runs()[0].cached);
+}
+
+#[test]
+fn a_very_long_panic_message_is_cut_and_stays_one_line() {
+    let fx = fx();
+    fx.set_test_output(&libtest_failures(&["t"], &"é".repeat(500)));
+    let n = &observe(&pack(symbols()), &fx.src, &tool(&fx)).notes()[0].clone();
+    assert!(n.matches('é').count() <= MAX_PANIC && !n.contains('\n'), "{n}");
+}
+
+#[test]
+fn test_DW_1_3_compile_failure_after_noise_is_unavailable_with_the_error_text() {
+    let fx = fx();
+    fx.flag("compile_fail", true);
+    let mut p = pack(symbols());
+    let obs = observe(&p, &fx.src, &tool(&fx));
+    obs.attach(&mut p, &fx.src);
+    assert!(p.symbols.iter().all(|s| s.coverage.is_none()) && obs.runs()[0].error.is_some() && !obs.runs()[0].degraded);
+    let note = p.notes.iter().find(|n| n.starts_with("coverage unavailable for package fx")).expect("a note");
+    assert!(note.contains("exited 101") && note.contains("error[E0425]: cannot find value `zzz`") && note.contains("could not compile"), "{note}");
+    assert!(!note.contains("noise-crate-0 "), "the tail, not the head: {note}");
+    assert_eq!(obs.lines_status("src/lib.rs", 1, 7), Hit::Unknown);
+}
+
+#[test]
+fn test_DW_1_4_old_llvm_cov_without_ignore_run_fail_is_retried_without_it() {
+    let fx = fx();
+    fx.flag("no_ignore_run_fail", true);
+    let mut p = pack(symbols());
+    let obs = observe(&p, &fx.src, &tool(&fx));
+    obs.attach(&mut p, &fx.src);
+    assert!(obs.runs()[0].error.is_none() && p.symbols[0].coverage.is_some() && p.notes.is_empty(), "{:?}", p.notes);
+    let runs = runs_of(&fx);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs[0].contains("--ignore-run-fail") && runs[0].contains("--branch"), "{runs:?}");
+    assert!(!runs[1].contains("--ignore-run-fail") && runs[1].contains("--branch"), "{runs:?}");
+}
+
+#[test]
+fn test_DW_1_4_ignore_run_fail_and_branch_fallbacks_compose() {
+    let fx = fx();
+    fx.flag("no_ignore_run_fail", true);
+    fx.flag("no_branch", true);
+    let mut p = pack(symbols());
+    let obs = observe(&p, &fx.src, &tool(&fx));
+    obs.attach(&mut p, &fx.src);
+    assert!(obs.runs()[0].error.is_none());
+    assert!(p.notes.iter().any(|n| n.contains("branch coverage is not supported")), "{:?}", p.notes);
+    let runs = runs_of(&fx);
+    let has = |i: usize, f: &str| runs[i].contains(f);
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    assert!(has(0, "--ignore-run-fail") && has(0, "--branch"));
+    assert!(!has(1, "--ignore-run-fail") && has(1, "--branch"));
+    assert!(!has(2, "--ignore-run-fail") && !has(2, "--branch"));
+}
+
+#[test]
+fn with_an_old_llvm_cov_failing_tests_are_unavailable_and_still_named() {
+    let fx = fx();
+    fx.flag("no_ignore_run_fail", true);
+    fx.flag("fail", true);
+    fx.set_test_output(&libtest_failures(&["a::b"], "boom"));
+    let obs = observe(&pack(symbols()), &fx.src, &tool(&fx));
+    assert!(obs.runs()[0].error.is_some(), "no report is produced by an old cargo-llvm-cov");
+    assert!(obs.notes()[0].contains("coverage unavailable for package fx") && obs.notes()[0].contains("1 test failed: a::b"), "{:?}", obs.notes());
+}
+
+#[test]
+fn test_DW_1_5_failing_then_passing_run_measures_afresh_and_has_no_note() {
+    let fx = fx();
+    let p = pack(symbols());
+    fx.set_test_output(&libtest_failures(&["a::b"], "boom"));
+    let first = observe(&p, &fx.src, &tool(&fx));
+    assert!(first.runs()[0].degraded && first.notes().len() == 1);
+    let again = observe(&p, &fx.src, &tool(&fx));
+    assert!(again.runs()[0].degraded && !again.runs()[0].cached && again.notes().len() == 1, "a repeated failing run shows the note again");
+    assert_eq!(runs_of(&fx).len(), 2, "a failing report is not served from the cache");
+    std::fs::remove_file(fx.fx.join("stdout.txt")).unwrap();
+    let clean = observe(&p, &fx.src, &tool(&fx));
+    assert!(!clean.runs()[0].cached && !clean.runs()[0].degraded && clean.notes().is_empty(), "{:?}", clean.notes());
+    assert_eq!(runs_of(&fx).len(), 3, "measured afresh");
+    assert!(observe(&p, &fx.src, &tool(&fx)).runs()[0].cached, "the clean report is cached");
+}
+
+#[test]
+fn failed_parse_is_none_without_failure_lines_and_dedupes_names() {
+    assert_eq!(Failed::parse("test a ... ok\ntest result: ok. 1 passed\n"), None);
+    let f = Failed::parse("test a::b ... FAILED\ntest a::b ... FAILED\ntest c ... ok\n").unwrap();
+    assert_eq!((f.names, f.first_panic), (vec!["a::b".to_string()], None));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 {
   "name": "alsp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Evidence about Rust code for agents: who calls a symbol, which tests reach it, coverage, predicted test gaps, and diff review, from the alsp command-line tool.",
   "author": { "name": "r" },
   "license": "MIT",

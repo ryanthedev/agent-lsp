@@ -193,6 +193,7 @@ impl Workspace {
         let obs = observe(&pack, &src, &tool);
         for r in obs.runs() {
             let what = match &r.error {
+                None if r.degraded => "measured, but some tests failed",
                 None => if r.cached { "cached" } else { "measured" },
                 Some(_) => "unavailable",
             };

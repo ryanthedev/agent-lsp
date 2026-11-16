@@ -30,19 +30,19 @@ Ask about a symbol (a name or a unique suffix such as net::send_frame) or file:l
 Ask about a diff:
   alsp pack --base <rev> [--head <rev>] [--with coverage,gaps]   changed symbols and callers
   alsp review [--base <rev>] [--quick|--full] [--agent codex|claude|agy]
-      evidence plus an agent review. No arguments: everything since the last review, uncommitted
-      work included. --quick: mechanical evidence only (no agents, no tests run), with the changed
-      symbols to pass to cover/gaps; --full: also measures coverage and gaps
+      evidence plus an agent review. No arguments: everything since the last review, uncommitted work
+      included. --quick: mechanical evidence only (no agents, no tests run), with the changed symbols
+      to pass to cover/gaps; --full: also measures coverage and gaps
 
 Flags on every query: --repo <path> (default: the git repo of the current directory),
   --json (stable schema), --all (no list caps), --no-build (index from a cached index only, never
-  by running rust-analyzer; see Trust; the first index of a large repo takes about 30 s, then it
-  is cached), --root <dir> (also index a Cargo package outside the root workspace, e.g.
-  apps/foo/rust; the answer says when needed).
+  by running rust-analyzer; see Trust; the first index of a large repo takes about 30 s, then it is
+  cached), --root <dir> (also index a Cargo package outside the root workspace, e.g. apps/foo/rust).
 
 Exit codes: 0 answered | 2 usage or other error | 3 no index could be served (stderr says why)
   | 4 target not found or ambiguous (candidates or nearest names are printed)
-  | 5 a needed measurement is unavailable (tests failed, sdd decide unavailable; the notes say why)
+  | 5 a needed measurement is unavailable (tests do not build, sdd decide unavailable; see notes)
+  Failing tests do not make coverage unavailable (exit 0; a note names them and the first panic).
 
 Trust: building the index runs the repository's build scripts, proc macros and cargo config
 (rust-analyzer does), for every command without --no-build; `review` has no --no-build. Running
@@ -215,6 +215,19 @@ mod tests {
         for exit in ["0 answered", "2 usage", "3 no index", "4 target", "5 a needed"] {
             assert!(AGENT_HELP.contains(exit), "{exit}");
         }
+    }
+
+    #[test]
+    fn test_DW_1_8_agent_help_and_docs_say_failing_tests_keep_coverage() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let help = flat(AGENT_HELP);
+        assert!(help.contains("Failing tests do not make coverage unavailable") && help.contains("exit 0") && help.contains("first panic"), "{help}");
+        assert!(!help.contains("(tests failed"), "{help}");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let docs = flat(&std::fs::read_to_string(root.join("docs/query.md")).unwrap());
+        assert!(docs.contains("--ignore-run-fail") && docs.contains("Failing tests do not make coverage unavailable") && !docs.contains("(tests failed"), "docs/query.md");
+        let skill = flat(&std::fs::read_to_string(root.join("skills/alsp/SKILL.md")).unwrap());
+        assert!(skill.contains("Failing tests do not cause this") && !skill.contains("(tests failed"), "skills/alsp/SKILL.md");
     }
 
     /// The trust statement is what an agent acts on: indexing itself runs repository code, and

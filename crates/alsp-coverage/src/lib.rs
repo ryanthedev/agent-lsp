@@ -6,9 +6,11 @@
 //! symbol's `coverage` ([`Observed::attach`]) and whether a span of lines ran
 //! ([`Observed::lines_status`], used to decide which mutants no test reaches).
 //!
-//! A package whose tests cannot run is *unavailable*, never zero: its symbols get no coverage, the
-//! reason goes into the pack's notes, and its lines answer [`Hit::Unknown`]. A package that has no
-//! tests but builds is measured, and honestly shows nothing hit.
+//! A package whose tests cannot run (it does not compile, `cargo llvm-cov` is missing) is
+//! *unavailable*, never zero: its symbols get no coverage, the reason goes into the pack's notes,
+//! and its lines answer [`Hit::Unknown`]. A package that has no tests but builds is measured, and
+//! honestly shows nothing hit. A package whose tests build but some of them fail is measured too
+//! (`--ignore-run-fail`), with a note naming the failing tests; that report is never cached.
 
 pub mod exec;
 mod lcov;
@@ -74,6 +76,8 @@ pub struct Run {
     pub millis: u64,
     /// Why there is no coverage; `None` when measured.
     pub error: Option<String>,
+    /// Measured, but some tests failed: the coverage is real and may under-count what they reach.
+    pub degraded: bool,
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +93,87 @@ struct Measured {
     files: HashMap<String, FileCov>,
     branches: bool,
     cached: bool,
+    /// Tests failed during the run that produced this report (never set for a cached one).
+    failed: Option<Failed>,
+}
+
+/// How many failing test names a note lists before "and N more".
+const MAX_NAMES: usize = 5;
+/// Longest panic text a note quotes, in characters.
+const MAX_PANIC: usize = 200;
+
+/// The failing tests libtest reported on a run's stdout.
+#[derive(Debug, PartialEq, Eq)]
+struct Failed {
+    /// Empty when only a `test result: FAILED` line was recognised.
+    names: Vec<String>,
+    /// The first panic message found, with its location.
+    first_panic: Option<String>,
+}
+
+impl Failed {
+    /// `None` when the output shows no failure.
+    fn parse(stdout: &str) -> Option<Failed> {
+        let mut names: Vec<String> = Vec::new();
+        for line in stdout.lines() {
+            if let Some(n) = line.trim_end().strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
+                if !names.iter().any(|x| x == n) {
+                    names.push(n.to_string());
+                }
+            }
+        }
+        if names.is_empty() && !stdout.contains("test result: FAILED") {
+            return None;
+        }
+        Some(Failed { first_panic: first_panic(stdout), names })
+    }
+
+    /// One line a person or agent can act on.
+    fn summary(&self) -> String {
+        let tests = match self.names.len() {
+            0 => "some tests failed (names not parsed)".to_string(),
+            n => {
+                let shown = self.names.iter().take(MAX_NAMES).map(String::as_str).collect::<Vec<_>>().join(", ");
+                let more = if n > MAX_NAMES { format!(" and {} more", n - MAX_NAMES) } else { String::new() };
+                format!("{n} test{} failed: {shown}{more}", if n == 1 { "" } else { "s" })
+            }
+        };
+        match &self.first_panic {
+            Some(p) => format!("{tests} - first panic: `{p}`"),
+            None => tests,
+        }
+    }
+}
+
+/// The first `panicked at` in a libtest `---- name stdout ----` block: the message, then the location.
+/// Rust prints the message on the line after `panicked at <loc>:` (older versions on the same line).
+fn first_panic(stdout: &str) -> Option<String> {
+    let mut in_block = false;
+    let mut lines = stdout.lines();
+    while let Some(line) = lines.next() {
+        if line.starts_with("---- ") && line.ends_with(" stdout ----") {
+            in_block = true;
+        } else if line == "failures:" {
+            in_block = false;
+        } else if in_block {
+            let Some((_, rest)) = line.split_once("panicked at ") else { continue };
+            let text = match rest.trim_end().strip_suffix(':') {
+                Some(loc) => match lines.by_ref().map(str::trim).find(|l| !l.is_empty()) {
+                    Some(msg) => format!("{msg} (at {loc})"),
+                    None => loc.to_string(),
+                },
+                None => rest.trim().to_string(),
+            };
+            return Some(text.chars().take(MAX_PANIC).collect());
+        }
+    }
+    None
+}
+
+/// Did cargo-llvm-cov refuse `flag` as an argument it does not know (a version older than the flag)?
+fn rejects_flag(stderr: &str, flag: &str) -> bool {
+    let e = stderr.to_lowercase();
+    e.contains(flag) && ["invalid", "unexpected", "unknown", "unrecognized"].iter().any(|w| e.contains(w))
 }
 
 /// `cargo llvm-cov` for one package, cached under `<cache_dir>/coverage/`.
@@ -106,7 +191,7 @@ fn measure(tool: &CoverageTool, pkg: &Package, src: &PackSource) -> Result<Measu
     let cached = dir.join(format!("{}.{hash}.lcov", pkg.name));
     if let Ok(text) = std::fs::read_to_string(&cached) {
         let branches = text.starts_with("# alsp branches=1");
-        return Ok(Measured { files: lcov::parse(&text), branches, cached: true });
+        return Ok(Measured { files: lcov::parse(&text), branches, cached: true, failed: None });
     }
 
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -115,9 +200,13 @@ fn measure(tool: &CoverageTool, pkg: &Package, src: &PackSource) -> Result<Measu
         pkg.name
     ));
     let out_path = dir.join(format!("{}.{hash}.lcov.tmp-{}", pkg.name, std::process::id()));
-    let attempt = |branch: bool| -> Result<exec::Output, String> {
+    let attempt = |branch: bool, ignore_run_fail: bool| -> Result<exec::Output, String> {
         let mut cmd = Command::new(&tool.program);
         cmd.arg("llvm-cov").args(["--lcov", "--output-path"]).arg(&out_path).args(["-p", &pkg.name]);
+        if ignore_run_fail {
+            // Failing tests still yield a report (and the other test binaries still run).
+            cmd.arg("--ignore-run-fail");
+        }
         if branch {
             cmd.arg("--branch");
         }
@@ -129,28 +218,42 @@ fn measure(tool: &CoverageTool, pkg: &Package, src: &PackSource) -> Result<Measu
         };
         exec::run_watching(&mut cmd, tool.timeout, 1500, Some(lock))
     };
-    let mut branches = true;
-    let mut out = attempt(true)?;
-    if !out.success() && out.stderr.contains("--branch") && out.stderr.to_lowercase().contains("nightly") {
-        // The toolchain cannot count branches: line coverage is still worth having.
-        branches = false;
-        out = attempt(false)?;
+    // Each optional flag is dropped at most once, when this cargo-llvm-cov rejects it.
+    let (mut branches, mut ignore_run_fail) = (true, true);
+    let mut out = attempt(branches, ignore_run_fail)?;
+    while !out.success() {
+        if ignore_run_fail && rejects_flag(&out.stderr, "--ignore-run-fail") {
+            // An older cargo-llvm-cov: a failing test then costs the report, as it always did.
+            ignore_run_fail = false;
+        } else if branches && out.stderr.contains("--branch") && out.stderr.to_lowercase().contains("nightly") {
+            // The toolchain cannot count branches: line coverage is still worth having.
+            branches = false;
+        } else {
+            break;
+        }
+        out = attempt(branches, ignore_run_fail)?;
     }
+    let failed = if out.success() { Failed::parse(&out.stdout) } else { None };
     if !out.success() {
         let _ = std::fs::remove_file(&out_path);
+        let tests = Failed::parse(&out.stdout).map(|f| format!("; {}", f.summary())).unwrap_or_default();
         return Err(match out.code {
-            Some(c) => format!("`cargo llvm-cov -p {}` exited {c}: {}", pkg.name, out.stderr),
-            None => format!("`cargo llvm-cov -p {}` was killed by a signal: {}", pkg.name, out.stderr),
+            Some(c) => format!("`cargo llvm-cov -p {}` exited {c}: {}{tests}", pkg.name, out.stderr),
+            None => format!("`cargo llvm-cov -p {}` was killed by a signal: {}{tests}", pkg.name, out.stderr),
         });
     }
     let body = std::fs::read_to_string(&out_path).map_err(|e| format!("cargo llvm-cov wrote no report: {e}"))?;
     let _ = std::fs::remove_file(&out_path);
-    let stored = format!("# alsp branches={}\n{body}", u8::from(branches));
-    let tmp = dir.join(format!("{}.{hash}.lcov.stage-{}", pkg.name, std::process::id()));
-    if std::fs::write(&tmp, &stored).and_then(|_| std::fs::rename(&tmp, &cached)).is_err() {
-        let _ = std::fs::remove_file(&tmp); // an unwritable cache costs only the next run's time
+    if failed.is_none() {
+        // Only a clean run is cached: a report made with failing tests must not be served later as
+        // if the tests passed (the next run, perhaps in a fixed environment, measures afresh).
+        let stored = format!("# alsp branches={}\n{body}", u8::from(branches));
+        let tmp = dir.join(format!("{}.{hash}.lcov.stage-{}", pkg.name, std::process::id()));
+        if std::fs::write(&tmp, &stored).and_then(|_| std::fs::rename(&tmp, &cached)).is_err() {
+            let _ = std::fs::remove_file(&tmp); // an unwritable cache costs only the next run's time
+        }
     }
-    Ok(Measured { files: lcov::parse(&body), branches, cached: false })
+    Ok(Measured { files: lcov::parse(&body), branches, cached: false, failed })
 }
 
 /// Measure every package that owns a changed, non-removed symbol of `pack`. Never fails: whatever
@@ -183,7 +286,14 @@ pub fn observe(pack: &EvidencePack, src: &PackSource, tool: &CoverageTool) -> Ob
         let millis = started.elapsed().as_millis() as u64;
         match result {
             Ok(m) => {
-                obs.runs.push(Run { package: pkg.name.clone(), cached: m.cached, millis, error: None });
+                obs.runs.push(Run { package: pkg.name.clone(), cached: m.cached, millis, error: None, degraded: m.failed.is_some() });
+                if let Some(f) = &m.failed {
+                    obs.notes.push(format!(
+                        "coverage for package {} was observed, but {}; lines those tests reach may be under-counted; fix the cause (often a missing environment variable the tests expect) and rerun",
+                        pkg.name,
+                        f.summary()
+                    ));
+                }
                 if !m.branches {
                     obs.notes.push(format!("branch coverage is not supported by this toolchain: package {} has line coverage only", pkg.name));
                 }
@@ -199,7 +309,7 @@ pub fn observe(pack: &EvidencePack, src: &PackSource, tool: &CoverageTool) -> Ob
                 }
             }
             Err(reason) => {
-                obs.runs.push(Run { package: pkg.name.clone(), cached: false, millis, error: Some(reason.clone()) });
+                obs.runs.push(Run { package: pkg.name.clone(), cached: false, millis, error: Some(reason.clone()), degraded: false });
                 obs.notes.push(format!("coverage unavailable for package {} ({} changed file(s)): {reason}", pkg.name, pkg_files.len()));
             }
         }

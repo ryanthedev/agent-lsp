@@ -50,7 +50,7 @@ Lines beginning `!` are notes: a dirty working tree, a root that failed to index
 | 2 | Usage error, not a git work tree, no `Cargo.toml` | Fix the command or directory |
 | 3 | No index could be served | An empty result means unknown, not none. `alsp review` and `alsp pack` exit 3 too: they still print what they have, but evidence is unknown, not absent (an empty symbol list means nothing was checked). On code you trust, retry without `--no-build` (that builds the index, which runs repository code), or add `--root` |
 | 4 | Target not found or ambiguous | Pick from the printed candidates or nearest names. If you know the symbol exists, it may sit in a Cargo package outside the root workspace: add `--root <package dir>` (for example `--root apps/foo/rust`) |
-| 5 | A measurement is unavailable (tests failed, sdd `decide` missing) | The partial answer is printed; its notes say why |
+| 5 | A measurement is unavailable (the package does not build, sdd `decide` missing) | The partial answer is printed; its notes say why. Failing tests do not cause this: coverage is still measured, exit 0, and a note names the failed tests and the first panic; fix the cause (often a missing environment variable) and rerun |
 
 ## Trust and cost
 
