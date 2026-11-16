@@ -16,9 +16,8 @@ use std::process::ExitCode;
 
 /// The short guide an agent reads first: `alsp` with no arguments and `alsp help agents`.
 pub const AGENT_HELP: &str = "\
-alsp: answers about Rust code, for agents. Every fact is marked with how it was found:
-[resolved] by the rust-analyzer index, [observed] by running tests, [predicted] by a model;
-a trailing ~ marks a heuristic.
+alsp: answers about Rust code, for agents. Every fact is marked with how it was found: [resolved]
+by the rust-analyzer index, [observed] by running tests, [predicted] by a model; ~ marks a heuristic.
 
 Ask about a symbol (a name or a unique suffix such as net::send_frame) or file:line:
   alsp sym <name>       where it is defined, its kind, how often it is used (lists every match)
@@ -26,6 +25,7 @@ Ask about a symbol (a name or a unique suffix such as net::send_frame) or file:l
   alsp tests <target>   tests that reach it; --run adds whether the package's tests execute it
   alsp cover <target>   line and branch coverage of its span (runs the tests)
   alsp gaps <target>    mutants in its span and the predicted chance the tests catch each
+  alsp doctor           what is missing (rust-analyzer, git, ...), each with its fix command
 
 Ask about a diff:
   alsp pack --base <rev> [--head <rev>] [--with coverage,gaps]   changed symbols and callers

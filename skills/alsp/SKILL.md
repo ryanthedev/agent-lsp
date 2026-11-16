@@ -1,6 +1,6 @@
 ---
 name: alsp
-description: Answers questions about Rust code through the alsp command line, which gives type-resolved callers, tests that reach a symbol, observed coverage, predicted test gaps and diff review, each fact marked by how it was found. Use instead of grep or git grep when asked in a Rust repository (one with a Cargo.toml) who calls or uses a function, where a symbol is defined, whether it is tested or covered, what a change impacts or could break, or to review a diff or recent changes. Not for code in any other language.
+description: Answers questions about Rust code through the alsp command line, which gives type-resolved callers, tests that reach a symbol, observed coverage, predicted test gaps and diff review, each fact marked by how it was found. Use instead of grep or git grep when asked in a Rust repository (one with a Cargo.toml) who calls or uses a function, where a symbol is defined, whether it is tested or covered, which tests a change affects or what breaks if it changes, or to review a diff or recent changes. Not for code in any other language.
 ---
 
 # alsp
@@ -12,14 +12,18 @@ description: Answers questions about Rust code through the alsp command line, wh
 | Question | Command |
 |---|---|
 | Where is `X` defined? | `alsp sym X` |
-| Who calls or uses `X`? What breaks if I change it? | `alsp refs X` |
-| Which tests reach `X`? | `alsp tests X` (add `--run` to see whether the package's tests execute it) |
+| Who calls or uses `X`? | `alsp refs X` |
+| What breaks if I change `X`? What does this change affect? | `alsp refs X` (callers, entry points), then `alsp tests X` (tests that reach it) |
+| Which tests break or need rerunning if I change `X`? Is `X` tested? | `alsp tests X` (add `--run` to see whether the package's tests execute it) |
 | How much of `X` do tests run? | `alsp cover X` |
 | Which bugs in `X` would tests miss? | `alsp gaps X` |
 | What does this diff touch? | `alsp pack --base <rev> [--head <rev>]` |
 | Review my changes | `alsp review` |
+| Is alsp set up? Something is missing | `alsp doctor` |
 
 `X` is a name (`handle_request`, or `net::handle_request`) or `file:line`. A name that matches several definitions makes `sym` list them all; every other command exits 4 and prints candidates, so repeat with a longer name or `file:line`.
+
+Run `alsp doctor` when a command fails for a missing tool: it lists each prerequisite with the command that fixes it, and its last line is `alsp doctor: ready` when `alsp`, `git` and `rust-analyzer` work.
 
 Use `alsp sym` first when unsure of the name, `alsp refs` for impact, `alsp tests` before claiming something is tested, and `alsp cover` or `gaps` only when the question is about test quality.
 
@@ -34,7 +38,9 @@ Each section line ends with how its facts were found:
 - `[predicted]`: estimated by a model (`gaps`); a lead to check, not a verdict.
 - trailing `~`: heuristic (for example `pub` standing in for "reachable from outside").
 
-Lines beginning `!` are notes: a dirty working tree, a root that failed to index, a measurement that is missing. Read them before quoting a result. When `refs` and `tests` come back empty with exit 0, the symbol is unused by resolved references, though macro-generated code and calls through trait objects can be missed.
+Lines beginning `!` are notes: a dirty working tree, a root that failed to index, a measurement that is missing. Read them before quoting a result. When `refs` and `tests` come back empty with exit 0, the symbol is unused by resolved references, though macro-generated code and calls through function pointers or macros can be missed.
+
+`refs` and `tests` on a trait method also include the call sites and tests of its impls, and on an impl method the sites that call through the trait. Those links are heuristic: groups end `via <A as T>::m` (or `via T::m`) and carry `~`, because a call through the trait may run any impl. Check them before relying on them.
 
 ## Exit codes
 
@@ -42,7 +48,7 @@ Lines beginning `!` are notes: a dirty working tree, a root that failed to index
 |---|---|---|
 | 0 | Answered | Use the answer |
 | 2 | Usage error, not a git work tree, no `Cargo.toml` | Fix the command or directory |
-| 3 | No index could be served | An empty result means unknown, not none. On code you trust, retry without `--no-build` (that builds the index, which runs repository code), or add `--root` |
+| 3 | No index could be served | An empty result means unknown, not none. `alsp review` and `alsp pack` exit 3 too: they still print what they have, but evidence is unknown, not absent (an empty symbol list means nothing was checked). On code you trust, retry without `--no-build` (that builds the index, which runs repository code), or add `--root` |
 | 4 | Target not found or ambiguous | Pick from the printed candidates or nearest names. If you know the symbol exists, it may sit in a Cargo package outside the root workspace: add `--root <package dir>` (for example `--root apps/foo/rust`) |
 | 5 | A measurement is unavailable (tests failed, sdd `decide` missing) | The partial answer is printed; its notes say why |
 

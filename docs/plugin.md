@@ -1,6 +1,6 @@
 # Plugin: alsp for Claude, Codex and agy
 
-The plugin is a skill (`skills/alsp/SKILL.md`) that teaches an agent the `alsp` command line: which command answers which question, how to read the `[resolved]`, `[observed]` and `[predicted]` marks, the exit codes, and the trust caveats. It contains no agent-specific logic and no server; the agent runs the same `alsp` commands from any host. It does not install the `alsp` binary, which must be on `PATH` first: `cargo install --git https://github.com/ryanthedev/agent-lsp alsp-cli`, or `cargo install --path crates/alsp-cli` from a clone.
+The plugin is a skill (`skills/alsp/SKILL.md`) that teaches an agent the `alsp` command line: which command answers which question, how to read the `[resolved]`, `[observed]` and `[predicted]` marks, the exit codes, and the trust caveats. It contains no agent-specific logic and no server; the agent runs the same `alsp` commands from any host. It does not install the `alsp` binary; `scripts/install.sh` installs both (see [install.md](install.md)).
 
 Files, one set of skills read by all three hosts:
 
@@ -12,15 +12,21 @@ Files, one set of skills read by all three hosts:
 
 The repository root is the plugin root (the marketplace entry has `"source": "./"`), so installing copies the whole repository. Install from GitHub or from a fresh clone rather than a working copy with a large `target/` directory.
 
-## Install
+## Install and update
 
-Run the command for your agent. Each one installs the skill only.
+```
+curl -fsSL https://raw.githubusercontent.com/ryanthedev/agent-lsp/main/scripts/install.sh | sh
+```
+
+The script installs the binary and the plugin for every one of `claude`, `codex` and `agy` it finds. To update, re-run it: it rebuilds the binary and refreshes each plugin from the public repository, so all three agents end on the same version. Then run `alsp doctor`. Options and undo commands are in [install.md](install.md).
+
+The by-hand commands, one agent at a time (each installs the skill only):
 
 **Claude Code**
 
 ```
-/plugin marketplace add ryanthedev/agent-lsp
-/plugin install alsp@agent-lsp
+claude plugin marketplace add ryanthedev/agent-lsp
+claude plugin install alsp@agent-lsp
 ```
 
 From a local clone, use its path instead of `ryanthedev/agent-lsp`. To try it for one session without installing: `claude --plugin-dir <path to this repository>`.
@@ -32,16 +38,14 @@ codex plugin marketplace add ryanthedev/agent-lsp
 codex plugin add alsp@agent-lsp
 ```
 
-A local path works as the marketplace source too.
-
-**agy**
+**agy** installs from a directory, so the script keeps a managed clone (`~/.local/share/agent-lsp-plugin`) and imports it:
 
 ```
-git clone https://github.com/ryanthedev/agent-lsp
-agy plugin import <path to the clone>
+git clone https://github.com/ryanthedev/agent-lsp ~/.local/share/agent-lsp-plugin
+agy plugin import ~/.local/share/agent-lsp-plugin
 ```
 
-`import` converts the Claude-format plugin into agy's layout and installs it (`agy plugin list` shows it). `agy plugin install alsp@agent-lsp` works once the marketplace is linked (`agy plugin link`).
+`import` converts the Claude-format plugin into agy's layout and installs it (`agy plugin list` shows it).
 
 ## Check it
 

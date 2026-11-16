@@ -12,10 +12,11 @@
 ## Install
 
 ```
-cargo install --git https://github.com/ryanthedev/agent-lsp alsp-cli
+curl -fsSL https://raw.githubusercontent.com/ryanthedev/agent-lsp/main/scripts/install.sh | sh
+alsp doctor
 ```
 
-or, from a clone, `cargo install --path crates/alsp-cli`. The binary is `alsp`.
+The script builds `alsp` with `cargo install`, adds `rust-analyzer` through rustup if it is missing, and installs the plugin for each of Claude Code, Codex and agy that it finds. None of them is required. Re-run it to update. `alsp doctor` then lists anything still missing, each with the command that fixes it. Read the script first if you like, or preview it with `sh scripts/install.sh --dry-run`; [docs/install.md](docs/install.md) has the options and how to undo each step.
 
 ## Quick start
 
@@ -64,14 +65,7 @@ Lines starting with `!` are notes (dirty working tree, a root that failed to ind
 
 ## Use it from an agent
 
-The plugin is one skill, `skills/alsp/SKILL.md`, that teaches Claude Code, Codex and agy which command answers which question and how to read the marks. It does not install the binary. See [docs/plugin.md](docs/plugin.md):
-
-```
-/plugin marketplace add ryanthedev/agent-lsp      # Claude Code
-/plugin install alsp --marketplace ryanthedev/agent-lsp
-codex plugin marketplace add ryanthedev/agent-lsp # Codex
-agy plugin import <path to a clone>               # agy
-```
+The plugin is one skill, `skills/alsp/SKILL.md`, that teaches Claude Code, Codex and agy which command answers which question and how to read the marks. The install script above sets it up; [docs/plugin.md](docs/plugin.md) has the by-hand commands. In Claude Code alone: `/plugin install alsp --marketplace ryanthedev/agent-lsp`.
 
 ## Trust and cost
 
@@ -81,7 +75,9 @@ Indexing runs the repository's build scripts and proc macros, because rust-analy
 
 - [docs/query.md](docs/query.md): symbol queries, output formats, JSON keys, exit codes, trust and cost.
 - [docs/review.md](docs/review.md): diff review, agents, the findings ledger and how well findings held up.
-- [docs/plugin.md](docs/plugin.md): installing the skill.
+- [docs/install.md](docs/install.md): the install script, its options, and undoing it.
+- [docs/doctor.md](docs/doctor.md): `alsp doctor`, what it checks.
+- [docs/plugin.md](docs/plugin.md): the plugin files and installing the skill by hand.
 - [docs/gaps-first-read.md](docs/gaps-first-read.md): a first measurement of predicted test gaps.
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md): building and changing `alsp`.
 
