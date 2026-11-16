@@ -57,7 +57,20 @@ install_codex() {
     say "codex: installing or updating the alsp plugin"
     try codex plugin marketplace add "$MARKETPLACE_REPO"
     step codex plugin marketplace upgrade agent-lsp || return 0
-    try codex plugin add "$PLUGIN"
+    if ! run codex plugin add "$PLUGIN"; then
+        # The add may fail only because the plugin is already there; the list says which.
+        listed=$(codex plugin list 2>/dev/null)
+        case $listed in
+            *"$PLUGIN"*) present=1 ;;
+            *) present=0 ;;
+        esac
+        if [ "$present" = 1 ]; then
+            warn "ignored (already present): codex plugin add $PLUGIN"
+        else
+            warn "failed: codex plugin add $PLUGIN (alsp is not in 'codex plugin list')"
+            failed=1
+        fi
+    fi
 }
 
 # agy installs from a directory, so keep a managed copy of the public repo and import it.

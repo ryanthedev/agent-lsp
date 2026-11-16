@@ -287,3 +287,30 @@ fn test_the_cheat_sheet_mentions_doctor() {
     let s = out(&o);
     assert!(s.contains("alsp doctor") && s.lines().count() < 40, "{s}");
 }
+
+/// A real run against fakes where `codex plugin add` exits 1; `list_output` is what `codex plugin list` prints.
+fn codex_add_fails(list_output: &str) -> Output {
+    let fx = Fx::with(&["cargo", "rustup", "alsp", "rust-analyzer"]);
+    fake(fx.tools.path(), "codex", &format!("case \"$*\" in *'plugin add'*) echo boom >&2; exit 1;; *'plugin list'*) echo '{list_output}';; esac"));
+    fx.run(&[])
+}
+
+#[test]
+fn test_a_failed_codex_plugin_add_with_no_alsp_in_the_list_fails_the_run() {
+    let o = codex_add_fails("other-plugin");
+    assert_eq!(o.status.code(), Some(1), "{}{}", out(&o), err(&o));
+    assert!(err(&o).contains("failed: codex plugin add alsp@agent-lsp"), "{}", err(&o));
+}
+
+#[test]
+fn test_a_failed_codex_plugin_add_is_tolerated_only_when_the_list_has_alsp() {
+    let o = codex_add_fails("alsp@agent-lsp  enabled");
+    assert_eq!(o.status.code(), Some(0), "{}{}", out(&o), err(&o));
+    assert!(err(&o).contains("ignored (already present): codex plugin add"), "{}", err(&o));
+}
+
+#[test]
+fn test_a_lookalike_plugin_name_does_not_count_as_alsp_present() {
+    let o = codex_add_fails("alsp-other@somewhere");
+    assert_eq!(o.status.code(), Some(1), "{}{}", out(&o), err(&o));
+}

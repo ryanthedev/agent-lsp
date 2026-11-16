@@ -5,8 +5,10 @@
 //! - Programs are found only in absolute `PATH` entries, and a file that resolves inside the
 //!   repository is never run. A tool is asked `--version` (or an agent CLI `plugin list`) and
 //!   nothing else.
-//! - Probes start from a neutral directory, never from the repository, so a repository cannot
-//!   steer rustup or cargo through its own toolchain file.
+//! - Probes start from `/`, never from the repository or a shared temp directory: rustup and cargo
+//!   search upward from their cwd for `rust-toolchain(.toml)` and `.cargo/config.toml`, and `/` is
+//!   root-owned, so neither the repository nor another local user (who can write to `/tmp`) can
+//!   plant one.
 //! - The repository root is found by looking for `.git` up the directory tree; git is never run to
 //!   find it, so no program is started before the repository is known and excluded.
 //! - doctor never builds an index and never runs a build script: rust-analyzer is only asked for
@@ -118,7 +120,7 @@ struct Ctx {
     path: OsString,
     /// Canonical repository root; nothing under it is run. `None` outside a work tree.
     repo: Option<PathBuf>,
-    /// Neutral working directory for every probe.
+    /// Working directory for every probe: always `/` (root-owned; see the module doc).
     cwd: PathBuf,
     limit: Duration,
     /// Limit for `plugin list` probes.
@@ -131,11 +133,7 @@ impl Ctx {
         // When set, the variable limits every probe, plugin probes included.
         let set = std::env::var("ALSP_DOCTOR_TIMEOUT_SECS").ok().and_then(|v| v.trim().parse::<u64>().ok()).map(|s| s.clamp(1, MAX_PROBE_SECS));
         let secs = |default| Duration::from_secs(set.unwrap_or(default));
-        let mut ctx = Ctx { path, repo: None, cwd: "/".into(), limit: secs(DEFAULT_PROBE_SECS), plugin_limit: secs(DEFAULT_PLUGIN_PROBE_SECS) };
-        ctx.repo = find_work_tree(repo_arg);
-        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| "/".into());
-        ctx.cwd = if ctx.inside_repo(&tmp) { "/".into() } else { tmp };
-        ctx
+        Ctx { path, repo: find_work_tree(repo_arg), cwd: "/".into(), limit: secs(DEFAULT_PROBE_SECS), plugin_limit: secs(DEFAULT_PLUGIN_PROBE_SECS) }
     }
 
     fn inside_repo(&self, real: &Path) -> bool {
@@ -378,6 +376,35 @@ mod tests {
         fs::write(root.join("a/.git"), "gitdir: elsewhere").unwrap();
         assert_eq!(find_work_tree(&root.join("a/b")), Some(root.join("a")));
         assert_eq!(find_work_tree(&root.join("missing")), None);
+    }
+
+    #[test]
+    fn probe_cwd_is_root_and_planted_toolchain_or_cargo_files_are_never_seen() {
+        let c = Ctx::from_process(Path::new("/"));
+        assert_eq!(c.cwd, PathBuf::from("/"));
+        // Stand-in for a hostile shared temp dir: a toolchain file with a `path =` override and a
+        // cargo config that would run a program. The probe starts in `/`, so it sees neither.
+        let d = tempfile::tempdir().unwrap();
+        let bin = fs::canonicalize(d.path()).unwrap();
+        let marker = bin.join("planted-ran");
+        fs::write(bin.join("rust-toolchain.toml"), format!("[toolchain]\npath = \"{}\"\n", bin.display())).unwrap();
+        fs::write(bin.join("rust-toolchain"), "nightly-planted\n").unwrap();
+        fs::create_dir_all(bin.join(".cargo")).unwrap();
+        fs::write(bin.join(".cargo/config.toml"), format!("[build]\nrustc-wrapper = \"{}\"\n", marker.display())).unwrap();
+        // `sees` prints the planted file names visible from its cwd, then the cwd.
+        let t = script(&bin, "sees", "ls -A | grep -c '^rust-toolchain' ; pwd -P");
+        let run_from = |cwd: &Path| {
+            let mut c = ctx(&bin, None, 5);
+            c.cwd = cwd.into();
+            let Probe::Output(o) = probe(&t, &[], &c, Duration::from_secs(5)) else { panic!("probe failed") };
+            o
+        };
+        // Control: from the planted dir the files are seen, so the check below can fail.
+        assert_eq!(run_from(&bin).lines().next(), Some("2"));
+        // The real context starts from `/` and sees none (grep -c prints 0, exits 1: the script ends on pwd).
+        let o = run_from(&Ctx::from_process(Path::new("/")).cwd);
+        assert_eq!(o.lines().collect::<Vec<_>>(), ["0", "/"], "{o}");
+        assert!(!marker.exists());
     }
 
     #[test]

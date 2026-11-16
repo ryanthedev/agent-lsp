@@ -6,9 +6,11 @@
 //!
 //! Trust rules. Everything here runs next to an untrusted repository, so:
 //! - A `PATH` entry that is relative, or whose file resolves inside the repository, is never run.
-//! - Probes run from a neutral directory, never from the repository: rustup picks its toolchain
-//!   from the directory it starts in, and a repository's `rust-toolchain.toml` may point it at a
-//!   toolchain living inside the repository.
+//! - Probes run from `/`, never from the repository or a shared temp directory: rustup picks its
+//!   toolchain (and cargo its config) from files found searching upward from the cwd. A
+//!   repository's `rust-toolchain.toml` may point at a toolchain inside the repository, and
+//!   another local user can plant the same files in a world-writable `/tmp`. `/` is root-owned.
+//!   Where a pin is meant, `RUSTUP_TOOLCHAIN` is set explicitly; otherwise it is removed.
 //! - The repository's pinned toolchain is read as text. A shim is tested under that pin with
 //!   `RUSTUP_TOOLCHAIN` instead of being started inside the repository. A name that is not a plain
 //!   toolchain name is dropped, so it never reaches a command line or the environment.
@@ -84,16 +86,12 @@ impl Env {
     }
 
     fn from_process(avoid: Vec<PathBuf>) -> Env {
-        let mut cwd = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| "/".into());
-        if avoid.iter().any(|a| cwd.starts_with(a)) {
-            cwd = "/".into();
-        }
         Env {
             avoid,
             alsp_ra: std::env::var_os("ALSP_RUST_ANALYZER").filter(|v| !v.is_empty()),
             path: std::env::var_os("PATH").unwrap_or_default(),
             rustup_toolchain: std::env::var_os("RUSTUP_TOOLCHAIN"),
-            probe_cwd: cwd,
+            probe_cwd: "/".into(),
         }
     }
 }
@@ -609,12 +607,30 @@ mod tests {
     }
 
     #[test]
-    fn test_DW_2_4_neutral_cwd_is_never_inside_the_repository() {
+    fn test_DW_2_4_neutral_cwd_is_root_never_the_repository_or_a_temp_dir() {
         let s = sb();
-        let env = Env::from_process(vec![s.repo.clone()]);
-        assert!(!env.probe_cwd.starts_with(&s.repo));
-        let inside = std::env::temp_dir();
-        let env = Env::from_process(vec![fs::canonicalize(&inside).unwrap()]);
-        assert_eq!(env.probe_cwd, PathBuf::from("/"));
+        assert_eq!(Env::from_process(vec![s.repo.clone()]).probe_cwd, PathBuf::from("/"));
+        let tmp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        assert_eq!(Env::from_process(vec![tmp]).probe_cwd, PathBuf::from("/"));
+        assert_eq!(Env::from_process(vec![]).probe_cwd, PathBuf::from("/"));
+    }
+
+    #[test]
+    fn planted_toolchain_and_cargo_files_in_a_shared_dir_never_reach_a_probe() {
+        let mut s = sb();
+        let planted = s._d.path().join("shared-tmp");
+        let marker = planted.join("ran");
+        fs::create_dir_all(planted.join(".cargo")).unwrap();
+        fs::write(planted.join("rust-toolchain.toml"), format!("[toolchain]\npath = \"{}\"\n", planted.display())).unwrap();
+        fs::write(planted.join("rust-toolchain"), "nightly-planted\n").unwrap();
+        fs::write(planted.join(".cargo/config.toml"), format!("[build]\nrustc-wrapper = \"{}\"\n", marker.display())).unwrap();
+        let ra = script(&s.bin, "rust-analyzer", "echo \"cwd=$(pwd -P)\"; if [ -e rust-toolchain.toml ]; then echo SAW; fi");
+        // Control: started in the planted dir, the probe sees the file, so the check below can fail.
+        s.env.probe_cwd = planted;
+        assert_eq!(run(&mut Command::new(&ra), &s.env, None).unwrap().lines().nth(1), Some("SAW"));
+        s.env.probe_cwd = Env::from_process(vec![]).probe_cwd;
+        let out = run(&mut Command::new(&ra), &s.env, None).unwrap();
+        assert_eq!(out, "cwd=/", "{out}");
+        assert!(!marker.exists());
     }
 }
