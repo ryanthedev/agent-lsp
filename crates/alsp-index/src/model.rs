@@ -63,6 +63,10 @@ pub struct Def {
     pub name_line: u32,
     /// The whole item, attributes and doc comments included.
     pub span: Span,
+    /// SCIP symbols this definition implements, as the indexer recorded them (`is_implementation`
+    /// relationships): an impl method's trait method. Empty when the indexer says nothing, which
+    /// is what rust-analyzer does today; [`SymbolIndex::links`] then falls back to names.
+    pub implements: Vec<String>,
 }
 
 impl Def {
@@ -80,6 +84,21 @@ pub struct RefSite {
     pub line: u32,
 }
 
+/// A trait method and an impl's method that stand for each other.
+#[derive(Clone, Copy, Debug)]
+pub struct Linked<'a> {
+    pub def: &'a Def,
+    /// The index recorded the link (an `is_implementation` relationship). `false`: the impl was
+    /// matched to a trait method of the same trait and method name, which is a guess.
+    pub exact: bool,
+    /// `def` is the trait's declaration, so a call that resolves to it may dispatch to any impl.
+    /// `false`: `def` is an impl's method, which a call on its own type reaches for certain.
+    pub declaration: bool,
+}
+
+/// Impl methods per trait method and back, as `(def index, exact)`.
+type LinkMap = HashMap<usize, Vec<(usize, bool)>>;
+
 #[derive(Default)]
 pub struct SymbolIndex {
     defs: Vec<Def>,
@@ -91,6 +110,12 @@ pub struct SymbolIndex {
     refs: HashMap<String, Vec<RefSite>>,
     /// Ambiguous id -> references to it from files that define none of its copies.
     unattributed: HashMap<String, usize>,
+    /// Trait method -> its impls' methods.
+    implementations: LinkMap,
+    /// Impl method -> the trait methods it implements.
+    declarations: LinkMap,
+    /// (trait, method) -> impl methods left unlinked because several traits carry that name.
+    unmatched: HashMap<(String, String), usize>,
 }
 
 impl SymbolIndex {
@@ -134,7 +159,8 @@ impl SymbolIndex {
                 }
             }
         }
-        SymbolIndex { defs, by_id, by_key, by_file, refs: keyed, unattributed }
+        let (implementations, declarations, unmatched) = link_impls(&defs, &by_id);
+        SymbolIndex { defs, by_id, by_key, by_file, refs: keyed, unattributed, implementations, declarations, unmatched }
     }
 
     pub fn def(&self, id: &str) -> Option<&Def> {
@@ -172,6 +198,32 @@ impl SymbolIndex {
         self.unattributed.get(&def.id).copied().unwrap_or(0)
     }
 
+    /// The trait/impl counterparts of `def`: for a trait method, the methods of every impl; for an
+    /// impl method, the trait method it implements. Empty for anything else, and for an impl of a
+    /// trait that is not defined in this index (`Display`, `Drop`: calls through those are not
+    /// attributed, which keeps std's call sites out of the answer).
+    ///
+    /// Links come from the indexer's `is_implementation` relationships when it writes them
+    /// (`exact`). rust-analyzer does not, so otherwise an impl method is matched to the one trait
+    /// method with the same trait and method name, preferring the same package; two candidates
+    /// mean no link (counted by [`SymbolIndex::unmatched_impls`]).
+    pub fn links(&self, def: &Def) -> Vec<Linked<'_>> {
+        let Some(&i) = self.by_key.get(&def.key) else { return Vec::new() };
+        let pick = |m: &LinkMap, declaration: bool| -> Vec<Linked<'_>> {
+            m.get(&i).into_iter().flatten().map(|&(j, exact)| Linked { def: &self.defs[j], exact, declaration }).collect()
+        };
+        let mut v = pick(&self.implementations, false);
+        v.extend(pick(&self.declarations, true));
+        v.sort_by(|a, b| (&a.def.file, a.def.name_line).cmp(&(&b.def.file, b.def.name_line)));
+        v
+    }
+
+    /// Impl methods of trait method `decl` that could not be linked because several traits in the
+    /// index share the trait's name and have this method.
+    pub fn unmatched_impls(&self, decl: &Def) -> usize {
+        trait_method_of(&decl.id).and_then(|k| self.unmatched.get(&k)).copied().unwrap_or(0)
+    }
+
     /// The smallest definition whose span contains `line`.
     pub fn innermost(&self, file: &str, line: u32) -> Option<&Def> {
         self.innermost_covering(file, line, line)
@@ -191,6 +243,77 @@ impl SymbolIndex {
     pub fn is_empty(&self) -> bool {
         self.defs.is_empty()
     }
+}
+
+/// The descriptor part of a SCIP symbol (`impl#[A][T]m().`), without scheme, manager and package.
+fn descriptor(symbol: &str) -> Option<&str> {
+    symbol.splitn(5, ' ').nth(4)
+}
+
+/// `rust-analyzer cargo fx 0.1.0` of a symbol: which package it belongs to.
+fn package(symbol: &str) -> &str {
+    let end = symbol.match_indices(' ').nth(3).map_or(symbol.len(), |(i, _)| i);
+    &symbol[..end]
+}
+
+/// `` `PartialEq<i32>` `` -> `PartialEq`.
+fn trait_name(group: &str) -> &str {
+    group.trim_matches('`').split('<').next().unwrap_or("")
+}
+
+/// `fx 0.1.0 m/impl#[A][T]run().` -> (`T`, `run`): the trait and method an impl method implements.
+fn impl_method_of(symbol: &str) -> Option<(String, String)> {
+    let desc = descriptor(symbol)?;
+    let rest = &desc[desc.find("impl#[")? + "impl#".len()..];
+    let (groups, name) = split_brackets(rest);
+    let [_, tr] = groups.as_slice() else { return None };
+    let method = name.strip_suffix("().")?;
+    (!method.is_empty() && !method.contains(['/', '#'])).then(|| (trait_name(tr).to_string(), method.to_string()))
+}
+
+/// `fx 0.1.0 m/T#run().` -> (`T`, `run`): the trait and method a trait method declares. An impl
+/// method (`impl#[..]`) is not one.
+fn trait_method_of(symbol: &str) -> Option<(String, String)> {
+    let desc = descriptor(symbol)?;
+    if desc.contains("impl#") {
+        return None;
+    }
+    let (owner, method) = desc.strip_suffix("().")?.rsplit_once('#')?;
+    let tr = trait_name(owner.rsplit('/').next()?);
+    (!tr.is_empty() && !method.is_empty() && !method.contains(['/', '#'])).then(|| (tr.to_string(), method.to_string()))
+}
+
+/// Pair impl methods with trait methods: by the indexer's relationships where it wrote them, else
+/// by trait and method name.
+fn link_impls(defs: &[Def], by_id: &HashMap<String, usize>) -> (LinkMap, LinkMap, HashMap<(String, String), usize>) {
+    let mut decls: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (i, d) in defs.iter().enumerate().filter(|(_, d)| d.kind.is_fn()) {
+        if let Some(k) = trait_method_of(&d.id) {
+            decls.entry(k).or_default().push(i);
+        }
+    }
+    let (mut implementations, mut declarations): (LinkMap, LinkMap) = Default::default();
+    let mut unmatched: HashMap<(String, String), usize> = HashMap::new();
+    let mut link = |decl: usize, imp: usize, exact: bool| {
+        implementations.entry(decl).or_default().push((imp, exact));
+        declarations.entry(imp).or_default().push((decl, exact));
+    };
+    for (i, d) in defs.iter().enumerate().filter(|(_, d)| d.kind.is_fn()) {
+        if !d.implements.is_empty() {
+            // The indexer spoke: use what it says, and do not second-guess a target outside the index.
+            d.implements.iter().filter_map(|t| by_id.get(t)).filter(|&&j| j != i).for_each(|&j| link(j, i, true));
+            continue;
+        }
+        let Some(key) = impl_method_of(&d.id) else { continue };
+        let all = decls.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+        let near: Vec<usize> = all.iter().copied().filter(|&j| package(&defs[j].id) == package(&d.id)).collect();
+        match (near.as_slice(), all) {
+            ([j], _) | ([], [j]) => link(*j, i, false),
+            ([], []) => {}
+            _ => *unmatched.entry(key).or_default() += 1,
+        }
+    }
+    (implementations, declarations, unmatched)
 }
 
 /// `rust-analyzer cargo proto 0.0.1 frame/impl#[Frame]fin().` -> `frame::Frame::fin`.
@@ -262,7 +385,7 @@ mod tests {
     use super::*;
 
     fn def(id: &str, file: &str, start: u32, end: u32, kind: SymKind) -> Def {
-        Def { id: id.into(), key: String::new(), name: id.into(), kind, file: file.into(), name_line: start, span: Span { start, end } }
+        Def { id: id.into(), key: String::new(), name: id.into(), kind, file: file.into(), name_line: start, span: Span { start, end }, implements: Vec::new() }
     }
 
     #[test]
@@ -348,6 +471,70 @@ mod tests {
         assert_eq!(idx.def_by_key("u").unwrap().file, "x.rs");
         assert!(idx.def_by_key("nope").is_none());
         assert_eq!(idx.defs().count(), idx.len(), "defs() visits every definition once");
+    }
+
+    const P: &str = "rust-analyzer cargo fx 0.1.0 ";
+
+    fn fn_def(id: &str, line: u32, implements: &[&str]) -> Def {
+        Def { implements: implements.iter().map(|s| s.to_string()).collect(), ..def(id, "src/lib.rs", line, line, SymKind::Fn) }
+    }
+    fn linked(idx: &SymbolIndex, id: &str) -> Vec<(String, bool, bool)> {
+        let d = idx.def(id).unwrap();
+        idx.links(d).iter().map(|l| (l.def.id.clone(), l.exact, l.declaration)).collect()
+    }
+
+    #[test]
+    fn impl_and_trait_methods_are_matched_by_trait_and_method_name_and_are_not_exact() {
+        let (t_m, a_m, b_m) = (format!("{P}T#m()."), format!("{P}impl#[A][T]m()."), format!("{P}impl#[B][T]m()."));
+        let idx = SymbolIndex::from_parts(vec![fn_def(&t_m, 2, &[]), fn_def(&a_m, 8, &[]), fn_def(&b_m, 11, &[]), fn_def(&format!("{P}impl#[A]m()."), 20, &[])], HashMap::new());
+        assert_eq!(linked(&idx, &t_m), vec![(a_m.clone(), false, false), (b_m, false, false)], "an inherent `A::m` is not an impl of T");
+        assert_eq!(linked(&idx, &a_m), vec![(t_m, false, true)]);
+        assert!(linked(&idx, &format!("{P}impl#[A]m().")).is_empty());
+    }
+
+    #[test]
+    fn test_DW_3_4_a_relationship_from_the_index_links_exactly_and_beats_the_names() {
+        // The impl's trait name matches nothing, so only the recorded relationship can link it.
+        let (decl, imp) = (format!("{P}Shape#area()."), format!("{P}impl#[Sq][Other]area()."));
+        let idx = SymbolIndex::from_parts(vec![fn_def(&decl, 2, &[]), fn_def(&imp, 8, &[&decl])], HashMap::new());
+        assert_eq!(linked(&idx, &decl), vec![(imp.clone(), true, false)]);
+        assert_eq!(linked(&idx, &imp), vec![(decl, true, true)]);
+        // A def with a relationship is never name-matched as well: `Shape` here would also match by name.
+        let (d2, i2) = (format!("{P}Shape#perimeter()."), format!("{P}impl#[Sq][Shape]perimeter()."));
+        let idx = SymbolIndex::from_parts(vec![fn_def(&d2, 2, &[]), fn_def(&i2, 8, &["some external trait method"])], HashMap::new());
+        assert!(linked(&idx, &d2).is_empty() && linked(&idx, &i2).is_empty(), "the indexer pointed elsewhere: trust it, do not guess");
+    }
+
+    #[test]
+    fn an_impl_of_a_trait_outside_the_index_has_no_links() {
+        // `Display::fmt` is not defined here: nothing to link, so no std call site can join in.
+        let imp = format!("{P}impl#[A][Display]fmt().");
+        let idx = SymbolIndex::from_parts(vec![fn_def(&imp, 14, &[]), fn_def(&format!("{P}impl#[B][`PartialEq<i32>`]eq()."), 20, &[])], HashMap::new());
+        assert!(linked(&idx, &imp).is_empty());
+    }
+
+    #[test]
+    fn same_named_traits_in_one_package_leave_the_impl_unlinked_and_counted_but_a_near_package_wins() {
+        let (a_t, b_t, imp) = (format!("{P}a/T#m()."), format!("{P}b/T#m()."), format!("{P}impl#[X][T]m()."));
+        let idx = SymbolIndex::from_parts(vec![fn_def(&a_t, 2, &[]), fn_def(&b_t, 4, &[]), fn_def(&imp, 8, &[])], HashMap::new());
+        assert!(linked(&idx, &a_t).is_empty() && linked(&idx, &imp).is_empty());
+        assert_eq!(idx.unmatched_impls(idx.def(&a_t).unwrap()), 1);
+        assert_eq!(idx.unmatched_impls(idx.def(&format!("{P}impl#[X][T]m().")).unwrap()), 0, "only trait methods report it");
+        // another package's `T` does not compete with the one in the impl's own package
+        let other = "rust-analyzer cargo other 0.1.0 T#m().";
+        let idx = SymbolIndex::from_parts(vec![fn_def(&format!("{P}T#m()."), 2, &[]), fn_def(other, 4, &[]), fn_def(&imp, 8, &[])], HashMap::new());
+        assert_eq!(linked(&idx, &imp), vec![(format!("{P}T#m()."), false, true)]);
+        // an impl in a package that has no `T` of its own links to the single `T` elsewhere
+        let imp2 = "rust-analyzer cargo third 0.1.0 impl#[X][T]m().";
+        let idx = SymbolIndex::from_parts(vec![fn_def(other, 4, &[]), fn_def(imp2, 8, &[])], HashMap::new());
+        assert_eq!(linked(&idx, imp2), vec![(other.to_string(), false, true)]);
+    }
+
+    #[test]
+    fn default_methods_and_blanket_impls_link_by_name() {
+        let (d, over, blanket) = (format!("{P}T#d()."), format!("{P}impl#[A][T]d()."), format!("{P}impl#[Z][T]d()."));
+        let idx = SymbolIndex::from_parts(vec![fn_def(&d, 3, &[]), fn_def(&over, 8, &[]), fn_def(&blanket, 12, &[])], HashMap::new());
+        assert_eq!(linked(&idx, &d).len(), 2, "an override and a blanket impl (`impl<Z: Bound> T for Z`)");
     }
 
     #[test]

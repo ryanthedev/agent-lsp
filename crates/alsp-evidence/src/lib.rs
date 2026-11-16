@@ -26,7 +26,7 @@ pub use graph::{incomplete_entry_points_note, Graph, Reach};
 pub use render::{approx_tokens, escape, CALLERS_SHOWN, ENTRY_POINTS_SHOWN, GAPS_SHOWN};
 pub use types::*;
 
-use alsp_index::{cache_dir_for, default_cache_root, open_index, BuildPolicy, IndexRequest, IndexState, SymbolIndex, Tool};
+use alsp_index::{cache_dir_for, default_cache_root, open_index, BuildPolicy, Def, IndexRequest, IndexState, SymbolIndex, Tool};
 pub use git::{command as git_command, Git, MAX_UNTRACKED_BYTES};
 use std::path::{Path, PathBuf};
 
@@ -117,6 +117,89 @@ pub fn test_fn_text(file_text: &str, name_line: u32) -> Option<String> {
     lines.get(item.start as usize - 1..(item.end as usize).min(lines.len())).map(|l| l.join("\n"))
 }
 
+/// Trait/impl links followed for one definition; the rest are counted in a note.
+pub const MAX_LINKED: usize = 25;
+
+/// A caller or entry point of a definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    pub edge: Edge,
+    /// Set when it was found only through a trait/impl link: how far to trust that link.
+    pub via: Option<Provenance>,
+}
+
+impl Hit {
+    /// The edge's own provenance, weakened to heuristic when the link it came through is.
+    pub fn provenance(&self) -> Provenance {
+        if self.via == Some(Provenance::Heuristic) { Provenance::Heuristic } else { self.edge.provenance }
+    }
+    pub fn into_edge(self) -> Edge {
+        Edge { provenance: self.provenance(), ..self.edge }
+    }
+}
+
+/// What reaches a definition, trait/impl counterparts included.
+pub struct Reached {
+    pub callers: Vec<Hit>,
+    pub entry_points: Vec<Hit>,
+    /// The entry-point list may be incomplete (see [`Reach::truncated`]).
+    pub truncated: bool,
+    /// Caveats about the links followed: capped, name-matched, or unmatched.
+    pub notes: Vec<String>,
+}
+
+/// How far to trust a link: exact (the index recorded it) from an impl's method to the trait's, or
+/// the reverse, where a call through the trait may run any impl, is never better than a guess.
+pub fn link_provenance(exact: bool, declaration: bool) -> Provenance {
+    if exact && !declaration { Provenance::Resolved } else { Provenance::Heuristic }
+}
+
+/// The note for impl methods of a trait that is not in the index (`Display`, `Drop`).
+pub fn unlinked_impls_note(names: &[String]) -> String {
+    format!("trait impl methods whose trait is not defined in this index: calls made through the trait are not attributed to the impl: {}", names.join(", "))
+}
+
+/// Callers and entry points of `d`. A call that resolves to a trait method may run any impl, and
+/// a call on a concrete type runs its impl of that method, so both are followed across the link:
+/// `d`'s counterparts (see `SymbolIndex::links`) contribute their callers and entry points, marked
+/// by how sure the link is. Calls made directly on `d` stay resolved.
+pub fn reach(graph: &mut Graph, idx: &SymbolIndex, d: &Def) -> Reached {
+    let mut callers: Vec<Hit> = graph.callers(&d.key).into_iter().map(|edge| Hit { edge, via: None }).collect();
+    let direct = graph.entry_points(d);
+    let mut truncated = direct.truncated;
+    let mut entry_points: Vec<Hit> = direct.entry_points.into_iter().map(|edge| Hit { edge, via: None }).collect();
+    let mut notes = Vec::new();
+    let links = idx.links(d);
+    if links.len() > MAX_LINKED {
+        notes.push(format!("{} has {} linked trait/impl methods; calls, tests and entry points reached through the first {MAX_LINKED} are included", d.name, links.len()));
+    }
+    let mut by_name = false;
+    for l in links.iter().take(MAX_LINKED) {
+        let via = link_provenance(l.exact, l.declaration);
+        by_name |= !l.exact;
+        for edge in graph.callers(&l.def.key) {
+            if !callers.iter().any(|h| h.edge.id == edge.id) {
+                callers.push(Hit { edge, via: Some(via) });
+            }
+        }
+        let r = graph.entry_points(l.def);
+        truncated |= r.truncated;
+        for edge in r.entry_points {
+            if !entry_points.iter().any(|h| (&h.edge.file, h.edge.line) == (&edge.file, edge.line)) {
+                entry_points.push(Hit { edge, via: Some(via) });
+            }
+        }
+    }
+    if by_name {
+        notes.push(format!("{}: the index records no link between trait methods and their impls, so they were matched by trait and method name (marked ~)", d.name));
+    }
+    let unmatched = idx.unmatched_impls(d);
+    if unmatched > 0 {
+        notes.push(format!("{unmatched} impl method(s) of {} could not be linked to it: several traits share its name, so calls on them are not included", d.name));
+    }
+    Reached { callers, entry_points, truncated, notes }
+}
+
 /// Symbols -> evidence, over an opened index. No git, no filesystem beyond `src`.
 fn assemble(base: String, head: String, diffs: &[diff::FileDiff], index: IndexState, idx: Option<&SymbolIndex>, src: &dyn Sources) -> EvidencePack {
     let mut pack = EvidencePack { base, head, index, symbols: Vec::new(), notes: Vec::new() };
@@ -128,22 +211,24 @@ fn assemble(base: String, head: String, diffs: &[diff::FileDiff], index: IndexSt
     pack.notes.extend(changes.notes);
     let mut graph = graph::Graph::new(idx, src);
     let mut trait_impls = Vec::new();
+    let mut link_notes: Vec<String> = Vec::new();
     let mut ambiguous = Vec::new();
     let mut truncated = Vec::new();
     for c in changes.symbols {
         let (callers, entry_points) = match &c.def {
             Some(d) if d.kind != alsp_index::SymKind::Module => {
-                let reach = graph.entry_points(d);
-                if reach.truncated {
+                let r = reach(&mut graph, idx, d);
+                if r.truncated {
                     truncated.push(c.name.clone());
                 }
+                link_notes.extend(r.notes.iter().cloned());
                 if d.is_ambiguous() {
                     ambiguous.push(format!("{} ({} unattributed)", c.name, idx.unattributed_refs(d)));
                 }
-                if d.kind.is_fn() && c.name.contains(" as ") {
+                if d.kind.is_fn() && c.name.contains(" as ") && idx.links(d).is_empty() {
                     trait_impls.push(c.name.clone());
                 }
-                (graph.callers(&d.key), reach.entry_points)
+                (r.callers.into_iter().map(Hit::into_edge).collect(), r.entry_points.into_iter().map(Hit::into_edge).collect())
             }
             _ => (Vec::new(), Vec::new()),
         };
@@ -164,8 +249,11 @@ fn assemble(base: String, head: String, diffs: &[diff::FileDiff], index: IndexSt
         pack.notes.push(graph::incomplete_entry_points_note(&truncated));
     }
     if !trait_impls.is_empty() {
-        pack.notes.push(format!("trait impl methods: calls made through the trait are not attributed to the impl: {}", trait_impls.join(", ")));
+        pack.notes.push(unlinked_impls_note(&trait_impls));
     }
+    link_notes.sort();
+    link_notes.dedup();
+    pack.notes.extend(link_notes);
     if !ambiguous.is_empty() {
         ambiguous.sort();
         ambiguous.dedup();
@@ -358,6 +446,29 @@ mod tests {
         assert_eq!(helper.callers.len(), 1, "only the same-file caller, not use_b: {:?}", helper.callers);
         assert!(helper.callers[0].file == "tests/a.rs");
         assert!(p.notes.iter().any(|n| n.contains("same symbol id as items in other crate roots") && n.contains("helper (0 unattributed)")), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn test_DW_3_1_a_changed_impl_method_gets_the_calls_made_through_the_trait_marked_heuristic() {
+        use crate::testkit::{trait_fixture_scip, TRAIT_LIB};
+        for relationships in [false, true] {
+            let idx = alsp_index::index_from_scip(&trait_fixture_scip(relationships)).unwrap();
+            let src = mem(&[("src/lib.rs", TRAIT_LIB)], &[("src/lib.rs", TRAIT_LIB)]);
+            // line 8 is `<A as T>::m`'s body; line 14 is the `Display` impl's
+            let p = assemble("b".into(), "h".into(), &[modified("src/lib.rs", (8, 8)), modified("src/lib.rs", (14, 14))], state(), Some(&idx), &src);
+            let a_m = p.symbols.iter().find(|s| s.name == "<A as T>::m").unwrap();
+            let callers: Vec<(String, Provenance)> = a_m.callers.iter().map(|e| (alsp_index::readable_name(&e.id), e.provenance)).collect();
+            assert_eq!(
+                callers,
+                vec![("direct_a".into(), Provenance::Resolved), ("t_direct_a".into(), Provenance::Resolved), ("via_dyn".into(), Provenance::Heuristic)],
+                "direct calls on A, then the dyn call that may run it"
+            );
+            assert!(a_m.entry_points.iter().any(|e| alsp_index::readable_name(&e.id) == "t_dyn" && e.provenance == Provenance::Heuristic), "{:?}", a_m.entry_points);
+            assert!(!p.notes.iter().any(|n| n.contains("<A as T>::m") && n.contains("not attributed")), "linked impls lose the old caveat: {:?}", p.notes);
+            let fmt = p.symbols.iter().find(|s| s.name == "<A as Display>::fmt").unwrap();
+            assert!(fmt.callers.is_empty(), "no std call site is attributed to the Display impl");
+            assert!(p.notes.iter().any(|n| n.contains("not defined in this index") && n.contains("<A as Display>::fmt") && !n.contains("<A as T>")), "{:?}", p.notes);
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use alsp_coverage::testkit::{install_fake_cargo, lcov, metadata_json};
 use alsp_decide::stub::FakeSdd;
-use alsp_evidence::testkit::scip_for;
+use alsp_evidence::testkit::{scip_for, trait_fixture_scip, TRAIT_LIB};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -382,4 +382,42 @@ fn test_DW_4_2_every_json_key_is_documented() {
     assert!(seen.len() > 30, "{seen:?}");
     let missing: Vec<&String> = seen.iter().filter(|k| !docs.contains(&format!("`{k}`"))).collect();
     assert!(missing.is_empty(), "undocumented JSON keys: {missing:?}");
+}
+
+/// A repository holding `TRAIT_LIB`, indexed by the fake rust-analyzer from hand-built SCIP.
+fn trait_env(relationships: bool) -> Env {
+    let e = Env::new(TRAIT_LIB, &[]);
+    fs::write(e.fx.join("default.scip"), trait_fixture_scip(relationships)).unwrap();
+    e
+}
+
+#[test]
+fn test_DW_3_1_refs_on_a_trait_method_and_on_its_impl_method_through_the_command_line() {
+    let e = trait_env(false);
+    let t = out(&e.run(&["refs", "T::m"], None));
+    assert!(t.contains("refs(4 in 4 symbols) [resolved+heuristic]\n  via_dyn src/lib.rs:17\n  direct_a src/lib.rs:20 via <A as T>::m~\n  t_direct_a src/lib.rs:30 [test] via <A as T>::m~\n  direct_b src/lib.rs:23 via <B as T>::m~\n"), "{t}");
+    assert!(t.contains("! T::m: the index records no link between trait methods and their impls"), "{t}");
+    let t = out(&e.run(&["refs", "<A as T>::m"], None));
+    assert!(t.contains("refs(3 in 3 symbols) [resolved+heuristic]\n  direct_a src/lib.rs:20\n  t_direct_a src/lib.rs:30 [test]\n  via_dyn src/lib.rs:17 via T::m~\n"), "{t}");
+    assert!(!t.contains("direct_b"), "{t}");
+    // JSON carries the same facts
+    let v = json(&e.run(&["refs", "<A as T>::m", "--json"], None));
+    assert_eq!(v["refs"]["items"][2]["via"], "T::m");
+    assert_eq!(v["refs"]["items"][2]["provenance"], "heuristic");
+}
+
+#[test]
+fn test_DW_3_2_tests_on_the_trait_method_include_the_test_that_only_calls_an_impl() {
+    let t = out(&trait_env(false).run(&["tests", "T::m"], None));
+    assert!(t.contains("tests(2) [resolved+heuristic]\n  t_dyn src/lib.rs:33 indirect\n  t_direct_a src/lib.rs:29 direct~\n"), "{t}");
+}
+
+#[test]
+fn test_DW_3_3_and_3_4_std_trait_impls_get_no_links_and_recorded_links_are_resolved() {
+    let e = trait_env(false);
+    let t = out(&e.run(&["refs", "<A as Display>::fmt"], None));
+    assert!(t.contains("refs(0 in 0 symbols) [resolved]\n"), "{t}");
+    assert!(t.contains("! trait impl methods whose trait is not defined in this index"), "{t}");
+    let t = out(&trait_env(true).run(&["refs", "T::m"], None));
+    assert!(t.contains("refs(4 in 4 symbols) [resolved]\n  via_dyn src/lib.rs:17\n  direct_a src/lib.rs:20 via <A as T>::m\n"), "{t}");
 }

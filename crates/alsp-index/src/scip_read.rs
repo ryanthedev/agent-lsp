@@ -57,6 +57,13 @@ pub fn read_scip(bytes: &[u8], prefix: &str) -> Result<(Vec<Def>, HashMap<String
             .iter()
             .filter_map(|s| s.kind.enum_value().ok().map(|k| (s.symbol.as_str(), k)))
             .collect();
+        // What the indexer says each symbol implements (`is_implementation` relationships).
+        let implements: HashMap<&str, Vec<String>> = doc
+            .symbols
+            .iter()
+            .map(|s| (s.symbol.as_str(), s.relationships.iter().filter(|r| r.is_implementation && !r.symbol.is_empty()).map(|r| r.symbol.clone()).collect::<Vec<_>>()))
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
         for occ in &doc.occurrences {
             if occ.symbol.is_empty() || occ.symbol.starts_with("local ") {
                 continue;
@@ -73,6 +80,7 @@ pub fn read_scip(bytes: &[u8], prefix: &str) -> Result<(Vec<Def>, HashMap<String
                     file: file.clone(),
                     name_line: line,
                     span: Span { start, end: end.max(start) },
+                    implements: implements.get(occ.symbol.as_str()).cloned().unwrap_or_default(),
                 });
             } else if occ.symbol_roles & ROLE_IMPORT == 0 {
                 refs.entry(occ.symbol.clone()).or_default().push(RefSite { file: file.clone(), line });
@@ -164,6 +172,35 @@ mod tests {
         assert_eq!(refs[&f], vec![RefSite { file: "unit/src/m.rs".into(), line: 10 }]);
         let idx = merge(vec![(defs, refs)]);
         assert_eq!(idx.references(&f).len(), 1);
+    }
+
+    #[test]
+    fn test_DW_3_4_implementation_relationships_are_read_onto_the_definition() {
+        use scip::types::Relationship;
+        let (tr, imp, plain) = (format!("{P}T#m()."), format!("{P}impl#[A][T]m()."), format!("{P}impl#[B][T]m()."));
+        let mut doc = Document::new();
+        doc.relative_path = "src/lib.rs".into();
+        doc.occurrences = vec![
+            occ(vec![1, 7, 8], &tr, 1, vec![1, 0, 1, 12]),
+            occ(vec![4, 7, 8], &imp, 1, vec![4, 0, 4, 12]),
+            occ(vec![7, 7, 8], &plain, 1, vec![7, 0, 7, 12]),
+        ];
+        let mut with = info(&imp, Kind::Method);
+        let (mut implementation, mut reference) = (Relationship::new(), Relationship::new());
+        implementation.symbol = tr.clone();
+        implementation.is_implementation = true;
+        reference.symbol = "unrelated".into();
+        reference.is_reference = true;
+        with.relationships = vec![reference, implementation];
+        doc.symbols = vec![info(&tr, Kind::TraitMethod), with, info(&plain, Kind::Method)];
+        let (defs, _) = read_scip(&encode(vec![doc]), "").unwrap();
+        let of = |id: &str| defs.iter().find(|d| d.id == id).unwrap().implements.clone();
+        assert_eq!(of(&imp), vec![tr.clone()], "only is_implementation counts");
+        assert!(of(&plain).is_empty() && of(&tr).is_empty());
+        // and the index links them exactly
+        let idx = merge(vec![(defs, HashMap::new())]);
+        let l = idx.links(idx.def(&tr).unwrap());
+        assert_eq!(l.iter().map(|l| (l.def.id.as_str(), l.exact)).collect::<Vec<_>>(), vec![(imp.as_str(), true), (plain.as_str(), false)]);
     }
 
     #[test]

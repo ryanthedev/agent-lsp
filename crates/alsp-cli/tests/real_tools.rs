@@ -161,3 +161,33 @@ fn real_cargo_mutants_list_lands_each_mutant_in_one_symbol() {
     let owned: BTreeSet<usize> = mutants.iter().filter_map(|m| owner_of(&fns, &m.file, (m.start.0, m.end.0))).collect();
     assert_eq!(owned.len(), 3, "every changed function owns a mutant: {owned:?}");
 }
+
+/// Trait/impl links against what rust-analyzer really writes: calls on a concrete type resolve to
+/// the impl's method, calls on `dyn T` to the trait's. The fixture is `testkit::TRAIT_LIB`.
+#[test]
+#[ignore = "needs rust-analyzer on PATH"]
+fn real_rust_analyzer_links_trait_and_impl_methods() {
+    use alsp_query::{OpenOptions, Workspace};
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(p.join("Cargo.toml"), "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(p.join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(p.join("src/lib.rs"), alsp_evidence::testkit::TRAIT_LIB).unwrap();
+    git(p, &["init", "-q", "-b", "main"]);
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "c"]);
+    let cache = tempfile::tempdir().unwrap();
+    let ws = Workspace::open(&OpenOptions { repo: p.into(), no_build: false, cache_root: Some(cache.path().into()), tool: Tool::default(), extra_roots: vec![] }).expect("opens");
+    let sites = |q: &str| -> BTreeSet<u32> { ws.refs(q).unwrap().refs.unwrap().items.iter().flat_map(|g| g.lines.clone()).collect() };
+    // hand-written from TRAIT_LIB: x.m() 17, a.m() 20, b.m() 23, A.m() 30
+    assert_eq!(sites("T::m"), [17, 20, 23, 30].into(), "the three calls on concrete types are found through the impl links");
+    assert_eq!(sites("<A as T>::m"), [17, 20, 30].into(), "A's direct calls plus the dyn call, not B's");
+    assert_eq!(sites("<B as T>::m"), [17, 23].into());
+    let tests = ws.tests("T::m", false).unwrap();
+    let names: BTreeSet<String> = tests.tests.unwrap().items.iter().map(|t| t.name.clone()).collect();
+    assert_eq!(names, ["t_direct_a".to_string(), "t_dyn".to_string()].into());
+    // Display is not defined here: no links, and format!'s call to std's fmt is nobody's site
+    let fmt = ws.refs("<A as Display>::fmt").unwrap();
+    assert!(fmt.refs.unwrap().items.iter().all(|g| !g.lines.contains(&26)) && fmt.reference_count == Some(0), "{:?}", fmt.notes);
+}

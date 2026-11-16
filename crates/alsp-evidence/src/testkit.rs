@@ -5,7 +5,7 @@
 use crate::syntax::{analyze, ItemKind};
 use alsp_index::{index_from_scip, SymbolIndex};
 use protobuf::Message;
-use scip::types::{symbol_information::Kind, Document, Index, Occurrence, SymbolInformation};
+use scip::types::{symbol_information::Kind, Document, Index, Occurrence, Relationship, SymbolInformation};
 
 const PREFIX: &str = "rust-analyzer cargo fx 0.0.1 ";
 
@@ -120,6 +120,138 @@ pub fn scip_for(files: &[(&str, &str)]) -> Vec<u8> {
     }
     let mut idx = Index::new();
     idx.documents = docs;
+    idx.write_to_bytes().expect("SCIP encodes")
+}
+
+/// A trait with two impls, a `dyn` call, direct calls on each concrete type, a std-trait impl and
+/// two tests (one calls the impl directly, one goes through `via_dyn`). Line numbers matter:
+/// [`trait_fixture_scip`] is written by hand against them.
+pub const TRAIT_LIB: &str = "\
+pub trait T {
+    fn m(&self) -> u32;
+    fn d(&self) -> u32 { 7 }
+}
+pub struct A;
+pub struct B;
+impl T for A {
+    fn m(&self) -> u32 { 1 }
+}
+impl T for B {
+    fn m(&self) -> u32 { 2 }
+}
+impl std::fmt::Display for A {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"A\") }
+}
+pub fn via_dyn(x: &dyn T) -> u32 {
+    x.m()
+}
+pub fn direct_a(a: &A) -> u32 {
+    a.m()
+}
+pub fn direct_b(b: &B) -> u32 {
+    b.m()
+}
+pub fn show(a: &A) -> String {
+    format!(\"{a}\")
+}
+#[test]
+fn t_direct_a() {
+    assert_eq!(A.m(), 1);
+}
+#[test]
+fn t_dyn() {
+    via_dyn(&A);
+}
+";
+
+/// SCIP for [`TRAIT_LIB`] (as `src/lib.rs`) the way rust-analyzer writes it: calls on a concrete
+/// type resolve to the impl's method, calls on `dyn T` to the trait's, the std impl's trait is an
+/// external symbol, and no relationships. With `relationships`, the impl methods also carry the
+/// `is_implementation` relationship to the trait method that an indexer could write.
+pub fn trait_fixture_scip(relationships: bool) -> Vec<u8> {
+    let sym = |d: &str| format!("{PREFIX}{d}");
+    let defs: [(&str, Kind, i32, i32, i32); 14] = [
+        ("T#", Kind::Trait, 1, 1, 4),
+        ("T#m().", Kind::TraitMethod, 2, 2, 2),
+        ("T#d().", Kind::Method, 3, 3, 3),
+        ("A#", Kind::Struct, 5, 5, 5),
+        ("B#", Kind::Struct, 6, 6, 6),
+        ("impl#[A][T]m().", Kind::Method, 8, 8, 8),
+        ("impl#[B][T]m().", Kind::Method, 11, 11, 11),
+        ("impl#[A][Display]fmt().", Kind::Method, 14, 14, 14),
+        ("via_dyn().", Kind::Function, 16, 16, 18),
+        ("direct_a().", Kind::Function, 19, 19, 21),
+        ("direct_b().", Kind::Function, 22, 22, 24),
+        ("show().", Kind::Function, 25, 25, 27),
+        ("t_direct_a().", Kind::Function, 29, 28, 31),
+        ("t_dyn().", Kind::Function, 33, 32, 35),
+    ];
+    let core = "rust-analyzer cargo core https://github.com/rust-lang/rust/library/core ";
+    let refs: [(i32, String); 9] = [
+        (7, sym("T#")),
+        (10, sym("T#")),
+        (13, format!("{core}fmt/Display#")),
+        (17, sym("T#m().")),
+        (20, sym("impl#[A][T]m().")),
+        (23, sym("impl#[B][T]m().")),
+        (26, format!("{core}fmt/Display#fmt().")), // `format!("{a}")` calls std's Display::fmt
+        (30, sym("impl#[A][T]m().")),
+        (34, sym("via_dyn().")),
+    ];
+    let mut doc = Document::new();
+    doc.relative_path = "src/lib.rs".into();
+    for (d, kind, name_line, start, end) in defs {
+        let mut o = Occurrence::new();
+        o.range = vec![name_line - 1, 0, 1];
+        o.symbol = sym(d);
+        o.symbol_roles = 1;
+        o.enclosing_range = vec![start - 1, 0, end - 1, 1];
+        doc.occurrences.push(o);
+        let mut si = SymbolInformation::new();
+        si.symbol = sym(d);
+        si.kind = kind.into();
+        if relationships && d.starts_with("impl#[") && d.contains("][T]m") {
+            let mut r = Relationship::new();
+            r.symbol = sym("T#m().");
+            r.is_implementation = true;
+            si.relationships.push(r);
+        }
+        doc.symbols.push(si);
+    }
+    for (line, symbol) in refs {
+        let mut o = Occurrence::new();
+        o.range = vec![line - 1, 4, 5];
+        o.symbol = symbol;
+        doc.occurrences.push(o);
+    }
+    let mut idx = Index::new();
+    idx.documents = vec![doc];
+    idx.write_to_bytes().expect("SCIP encodes")
+}
+
+/// SCIP written by hand for one file `src/lib.rs`: each def is `(descriptor, 0-based line)` and spans
+/// that one line; each reference is `(descriptor, 0-based line)`. Every def is a method (a
+/// descriptor ending in `().`) or a trait. For fixtures the name-based double cannot express.
+pub fn scip_by_hand(defs: &[(&str, i32)], refs: &[(&str, i32)]) -> Vec<u8> {
+    let mut doc = Document::new();
+    doc.relative_path = "src/lib.rs".into();
+    for (d, line) in defs {
+        let id = format!("{PREFIX}{d}");
+        let mut o = Occurrence::new();
+        (o.range, o.symbol, o.symbol_roles, o.enclosing_range) = (vec![*line, 0, 1], id.clone(), 1, vec![*line, 0, *line, 1]);
+        doc.occurrences.push(o);
+        let mut si = SymbolInformation::new();
+        si.symbol = id;
+        si.kind = if d.ends_with("().") { Kind::Method } else { Kind::Trait }.into();
+        doc.symbols.push(si);
+    }
+    for (d, line) in refs {
+        let mut o = Occurrence::new();
+        (o.range, o.symbol) = (vec![*line, 4, 5], format!("{PREFIX}{d}"));
+        doc.occurrences.push(o);
+    }
+    let mut idx = Index::new();
+    idx.documents = vec![doc];
     idx.write_to_bytes().expect("SCIP encodes")
 }
 

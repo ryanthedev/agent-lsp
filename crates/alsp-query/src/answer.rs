@@ -76,6 +76,13 @@ pub struct RefGroup {
     /// The enclosing symbol is a `#[test]` function or lives under `tests/`.
     pub test: bool,
     pub lines: Vec<u32>,
+    /// `resolved` for a use of the target itself, or of its impl method when the index recorded
+    /// the link; `heuristic` when the group is reached across a trait/impl link that was matched
+    /// by name, or through the trait (a call that may run another impl).
+    pub provenance: Provenance,
+    /// The trait or impl method the sites actually resolve to, when that is not the target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -95,6 +102,9 @@ pub struct TestRef {
     pub line: u32,
     /// The test itself uses the target; otherwise it reaches it through other functions.
     pub direct: bool,
+    /// `heuristic` when the test reaches the target only across a name-matched trait/impl link, or
+    /// through a call that may run another impl.
+    pub provenance: Provenance,
 }
 
 /// Whether the package's tests ran the target's lines.
@@ -202,9 +212,11 @@ impl Answer {
         }
         if let Some(s) = &self.refs {
             let sites = self.reference_count.unwrap_or(0);
-            section(&mut out, &format!("refs({sites} in {} symbols)", s.total), s, |g| {
+            let tag = mixed_tag(s.provenance, s.items.iter().map(|g| g.provenance));
+            section_tagged(&mut out, &format!("refs({sites} in {} symbols)", s.total), &tag, s, |g| {
                 let mark = if g.test { " [test]" } else { "" };
-                format!("{} {}:{}{mark}", escape(&g.symbol), escape(&g.file), lines(&g.lines))
+                let via = g.via.as_ref().map(|v| format!(" via {}", escape(v))).unwrap_or_default();
+                format!("{} {}:{}{mark}{via}{}", escape(&g.symbol), escape(&g.file), lines(&g.lines), tilde(g.provenance))
             });
         }
         if let Some(s) = &self.entry_points {
@@ -215,7 +227,8 @@ impl Answer {
             });
         }
         if let Some(s) = &self.tests {
-            section(&mut out, &format!("tests({})", s.total), s, |t| format!("{} {}:{} {}", escape(&t.name), escape(&t.file), t.line, if t.direct { "direct" } else { "indirect" }));
+            let tag = mixed_tag(s.provenance, s.items.iter().map(|t| t.provenance));
+            section_tagged(&mut out, &format!("tests({})", s.total), &tag, s, |t| format!("{} {}:{} {}{}", escape(&t.name), escape(&t.file), t.line, if t.direct { "direct" } else { "indirect" }, tilde(t.provenance)));
         }
         if let Some(e) = &self.executed {
             out.push(format!("executed: {} ({}/{} lines ran) [{}]", e.status, e.lines_hit, e.lines_total, e.provenance.as_str()));
@@ -241,6 +254,21 @@ impl Answer {
             out.push(format!("! unavailable: {}", escape(u)));
         }
         out.join("\n") + "\n"
+    }
+}
+
+/// A heuristic item ends in `~`.
+fn tilde(p: Provenance) -> &'static str {
+    if p == Provenance::Heuristic { "~" } else { "" }
+}
+
+/// The section's tag: its own provenance, or `resolved+heuristic` when its items differ.
+fn mixed_tag(base: Provenance, items: impl Iterator<Item = Provenance>) -> String {
+    let items: Vec<Provenance> = items.collect();
+    if items.iter().any(|p| *p == Provenance::Heuristic) && items.iter().any(|p| *p == Provenance::Resolved) {
+        "resolved+heuristic".into()
+    } else {
+        items.first().copied().unwrap_or(base).as_str().into()
     }
 }
 
@@ -348,7 +376,7 @@ mod tests {
     #[test]
     fn json_omits_sections_that_do_not_apply_and_names_provenance() {
         let mut a = Answer::new("tests", Some(target()), fresh());
-        a.tests = Some(Section::capped(Provenance::Resolved, vec![TestRef { name: "t".into(), file: "f.rs".into(), line: 2, direct: true }], 5));
+        a.tests = Some(Section::capped(Provenance::Resolved, vec![TestRef { name: "t".into(), file: "f.rs".into(), line: 2, direct: true, provenance: Provenance::Resolved }], 5));
         let v: serde_json::Value = serde_json::from_str(&a.to_json()).unwrap();
         assert_eq!(v["schema"], 1);
         assert_eq!(v["tests"]["provenance"], "resolved");

@@ -54,8 +54,8 @@ entry(2) [resolved+heuristic]
 - `target KIND FILE:SPAN [resolved]`; a whole file is `1-end`.
 - `! ...` lines are notes: caveats the reader needs to weigh the facts. A dirty working tree is one: the index always describes the working tree (it is rebuilt when its sources changed), and the note names the uncommitted Rust and Cargo files so a stale mental model of `HEAD` is not mistaken for the index. Others: a root that failed to index, an entry-point search that hit its limit, references that cannot be attributed (same symbol id in several crate roots), why a measurement is missing.
 - `sym`: `matches(N) [resolved]`, then `KIND NAME FILE:LINE refs=N` (the line of the name).
-- `refs`: `refs(SITES in GROUPS symbols)`, then `SYMBOL FILE:LINES` with `[test]` when the enclosing symbol is a `#[test]` function or lives under `tests/`; then `entry(N)`, then `KIND NAME FILE:LINE` with kind `test`, `main` or `pub`. References that sit in no indexed symbol (macro-generated code the index gives no span for) are grouped under `<outside any symbol>`; imports appear under their module.
-- `tests`: `tests(N) [resolved]`, then `NAME FILE:LINE direct|indirect` (the test uses the target itself, or reaches it through other functions), nearest first. With `--run`: `executed: yes|no|unknown (HIT/TOTAL lines ran) [observed]`.
+- `refs`: `refs(SITES in GROUPS symbols)`, then `SYMBOL FILE:LINES` with `[test]` when the enclosing symbol is a `#[test]` function or lives under `tests/`; then `entry(N)`, then `KIND NAME FILE:LINE` with kind `test`, `main` or `pub`. References that sit in no indexed symbol (macro-generated code the index gives no span for) are grouped under `<outside any symbol>`; imports appear under their module. A group made of uses of a trait method's impl (or of an impl method's trait) ends `via <A as T>::m` (what the sites actually resolve to), with `~` when heuristic; see "Trait methods and their impls" below.
+- `tests`: `tests(N) [resolved]`, then `NAME FILE:LINE direct|indirect` (the test uses the target itself, or reaches it through other functions), nearest first, `~` after a test found only across a heuristic trait/impl link. With `--run`: `executed: yes|no|unknown (HIT/TOTAL lines ran) [observed]`.
 - `cover`: `lines HIT/TOTAL covered[, branches HIT/TOTAL] [observed]` and `uncovered: LINES [observed]`.
 - `gaps`: `gaps(N) [...]`, then `FILE:LINE MUTATION p=0.20 [predicted]` or `FILE:LINE MUTATION uncovered [observed]`; predictions first, lowest chance first.
 - `! unavailable: ...` as the last line when a needed measurement could not be made.
@@ -73,9 +73,9 @@ entry(2) [resolved+heuristic]
 | `notes` | Strings: the `!` lines. |
 | `matches` | `sym` only. A list section (below) of `name`, `kind`, `file`, `line` (of the name), `span`, `references`. |
 | `reference_count` | `refs` only. Reference sites before grouping. |
-| `refs` | `refs` only. A list section of groups: `symbol`, `kind`, `file`, `test`, `lines`. |
+| `refs` | `refs` only. A list section of groups: `symbol`, `kind`, `file`, `test`, `lines`, `provenance` of the group, and `via` (absent for a direct use of the target: the trait or impl method the sites resolve to). |
 | `entry_points` | `refs` only. A list section of `name`, `kind` (`test`, `main`, `pub`), `file`, `line`, `provenance` of each. |
-| `tests` | `tests` only. A list section of `name`, `file`, `line`, `direct`. |
+| `tests` | `tests` only. A list section of `name`, `file`, `line`, `direct`, `provenance`. |
 | `executed` | `tests --run` only. `provenance`, `status` (`yes`, `no`, `unknown`), `lines_hit`, `lines_total`. |
 | `coverage` | `cover` only; absent when nothing was measured or the span has no instrumented line. `provenance`, `lines_total`, `lines_hit`, `branches_total`, `branches_hit` (null when the toolchain cannot count branches), `uncovered_lines`. |
 | `gaps` | `gaps` only. A list section of `file`, `line`, `mutation`, `p_tests_catch` (0 for lines no test runs), `provenance` of each (`observed` or `predicted`). |
@@ -127,10 +127,19 @@ What this does not cover: a program named in your own **global** git config (`~/
 
 `cover`, `gaps` and `tests --run` go further and also build and run the repository's tests under `cargo llvm-cov` (build scripts, proc macros, tests), as do `alsp pack --with` and `alsp review --full` or `--with coverage|gaps`, and `--no-build` does not prevent it (the tests are built even when the index came from the cache): use them only on code you trust. Results are cached per package by content hash (the package's workspace sources, `Cargo.toml` files and `Cargo.lock`, plus the `cargo-llvm-cov` version; nothing about the environment, so `CARGO_TARGET_DIR`, `RUSTFLAGS` and the like do not change it), so a repeat query after no edits costs nothing, and any edit to a source file in the workspace starts a new test run. Before it starts a test run, or when cargo reports it is waiting for another cargo's file lock, `alsp` prints one line to stderr saying so (`alsp: coverage <package>: no cached report ...` or `... cargo is waiting for a file lock ...`) and that a cold instrumented build takes minutes, so a caller that must stay inside a time limit can run the command in the background or under `timeout`. `gaps` also lists mutants with `cargo mutants --list` (nothing is executed) and sends the enclosing function and the tests that reach it to the decision model, the same backend `alsp pack --with gaps` uses (Gemini through sdd's `decide` command, found via `ALSP_SDD_ROOT` and run with `ALSP_BUN`; alsp holds no key; spend is printed on stderr). Mutants on lines no test runs are reported without a model call.
 
+## Trait methods and their impls
+
+In the index a call on a concrete type resolves to the impl's method (`<A as T>::m`) and a call through `dyn T` or a generic bound to the trait's (`T::m`); the two never meet. `refs`, `tests`, the entry points and `alsp pack` callers therefore follow the link both ways:
+
+- on a trait method, the sites that resolve to each impl's method are included, as groups ending `via <A as T>::m`;
+- on an impl method, its own uses come first, then the sites that resolve to the trait method (`via T::m`): a call through the trait may run any impl, so these are always heuristic (`~`).
+
+Where the link comes from sets the provenance of the trait-to-impl direction. If the indexer wrote an `is_implementation` relationship, the link is resolved. rust-analyzer writes none today, so impls are matched to the trait method of the same trait name and method name (preferring the package the impl is in), the group is heuristic, and a note says so. Two traits of one name with that method make the match ambiguous: the impl is left unlinked and a note counts it. An impl of a trait that is not defined in the index (`Display`, `Drop`, `Iterator`) has no link, so no std call site is listed, and the answer notes that calls through the trait are not attributed. At most 25 linked methods are followed per target (the answer says when more exist).
+
 ## Limits
 
 - Rust only. No daemon, no editing.
-- `tests --run` says whether the package's tests ran the target, not which test did: coverage is measured for the whole package at once. Tests listed by `tests` are the ones that reach the target through resolved references; calls through trait objects, function pointers or macros are not followed, so a test can run code it is not listed for (the answer notes the case).
+- `tests --run` says whether the package's tests ran the target, not which test did: coverage is measured for the whole package at once. Tests listed by `tests` are the ones that reach the target through resolved references or the trait/impl links above (marked `~` when heuristic); calls through function pointers or macros are not followed, and a call through a trait is attributed to every impl, so a test can run code it is not listed for or be listed for code it did not run (the answer notes the case).
 - `entry` kind `pub` is heuristic: `pub` does not mean reachable from outside the crate.
 - References from macro-expanded or generated code have no source span in the index and may be missing or grouped under `<outside any symbol>`.
 - Test files (`tests/`, `benches/`, `examples/`) are not measured: `cargo llvm-cov` reports nothing for them.

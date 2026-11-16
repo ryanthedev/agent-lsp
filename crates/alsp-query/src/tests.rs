@@ -408,3 +408,138 @@ fn tree_sources_read_head_files_only_inside_the_tree() {
     let s = TreeSources(d.path());
     assert_eq!((s.head("a.rs").as_deref(), s.head("../a.rs"), s.head("/etc/passwd"), s.base("a.rs")), (Some("x"), None, None, None));
 }
+
+// --- trait/impl links -------------------------------------------------------------------------
+
+/// `TRAIT_LIB` as `src/lib.rs` of a throwaway tree, indexed from hand-built SCIP.
+fn trait_world(relationships: bool) -> (tempfile::TempDir, Workspace) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), alsp_evidence::testkit::TRAIT_LIB).unwrap();
+    let idx = alsp_index::index_from_scip(&alsp_evidence::testkit::trait_fixture_scip(relationships)).unwrap();
+    let ws = Workspace::new(dir.path().to_path_buf(), dir.path().join("cache"), idx);
+    (dir, ws)
+}
+
+/// `(symbol, lines, via, provenance)` of every refs group.
+fn groups(a: &Answer) -> Vec<(String, Vec<u32>, Option<String>, Provenance)> {
+    a.refs.as_ref().unwrap().items.iter().map(|g| (g.symbol.clone(), g.lines.clone(), g.via.clone(), g.provenance)).collect()
+}
+
+fn group(symbol: &str, line: u32, via: Option<&str>, p: Provenance) -> (String, Vec<u32>, Option<String>, Provenance) {
+    (symbol.to_string(), vec![line], via.map(String::from), p)
+}
+
+#[test]
+fn test_DW_3_1_refs_on_the_trait_method_list_every_call_site_with_provenance() {
+    let (_d, ws) = trait_world(false);
+    let a = ws.refs("T::m").unwrap();
+    assert_eq!(
+        groups(&a),
+        vec![
+            group("via_dyn", 17, None, Provenance::Resolved),
+            group("direct_a", 20, Some("<A as T>::m"), Provenance::Heuristic),
+            group("t_direct_a", 30, Some("<A as T>::m"), Provenance::Heuristic),
+            group("direct_b", 23, Some("<B as T>::m"), Provenance::Heuristic),
+        ]
+    );
+    assert_eq!(a.reference_count, Some(4), "the dyn call and the three calls on concrete types");
+    let t = a.to_text();
+    assert!(t.contains("refs(4 in 4 symbols) [resolved+heuristic]"), "{t}");
+    assert!(t.contains("direct_a src/lib.rs:20 via <A as T>::m~\n"), "{t}");
+    assert!(t.contains("via_dyn src/lib.rs:17\n"), "{t}");
+    assert!(a.notes.iter().any(|n| n.contains("matched by trait and method name")), "{:?}", a.notes);
+}
+
+#[test]
+fn test_DW_3_1_refs_on_an_impl_method_list_direct_calls_and_trait_dispatched_calls() {
+    let (_d, ws) = trait_world(false);
+    let a = ws.refs("<A as T>::m").unwrap();
+    assert_eq!(
+        groups(&a),
+        vec![
+            group("direct_a", 20, None, Provenance::Resolved),
+            group("t_direct_a", 30, None, Provenance::Resolved),
+            group("via_dyn", 17, Some("T::m"), Provenance::Heuristic),
+        ],
+        "B's call site is not A's, and the dyn call may run A"
+    );
+    // even when the index recorded the link, a call through the trait may run another impl
+    let (_d, ws) = trait_world(true);
+    assert_eq!(groups(&ws.refs("<A as T>::m").unwrap())[2], group("via_dyn", 17, Some("T::m"), Provenance::Heuristic));
+}
+
+#[test]
+fn test_DW_3_4_links_from_the_index_are_resolved_and_names_are_marked_heuristic() {
+    let (_d, by_name) = trait_world(false);
+    let (_d2, recorded) = trait_world(true);
+    let prov = |ws: &Workspace| groups(&ws.refs("T::m").unwrap()).into_iter().map(|g| g.3).collect::<Vec<_>>();
+    use Provenance::{Heuristic as H, Resolved as R};
+    assert_eq!(prov(&by_name), vec![R, H, H, H]);
+    assert_eq!(prov(&recorded), vec![R, R, R, R], "SCIP relationships make the trait-to-impl links resolved");
+    assert!(!recorded.refs("T::m").unwrap().notes.iter().any(|n| n.contains("matched by trait and method name")));
+    let json: serde_json::Value = serde_json::from_str(&recorded.refs("T::m").unwrap().to_json()).unwrap();
+    assert_eq!(json["refs"]["items"][1]["via"], "<A as T>::m");
+    assert_eq!(json["refs"]["items"][1]["provenance"], "resolved");
+    assert!(json["refs"]["items"][0].get("via").is_none(), "a direct use has no via");
+}
+
+#[test]
+fn test_DW_3_2_tests_on_the_trait_method_include_tests_that_only_call_the_impl() {
+    let (_d, ws) = trait_world(false);
+    let a = ws.tests("T::m", false).unwrap();
+    let got: Vec<(String, bool, Provenance)> = a.tests.as_ref().unwrap().items.iter().map(|t| (t.name.clone(), t.direct, t.provenance)).collect();
+    assert_eq!(got, vec![("t_dyn".to_string(), false, Provenance::Resolved), ("t_direct_a".to_string(), true, Provenance::Heuristic)], "what reaches the trait method itself comes first");
+    assert!(a.to_text().contains("tests(2) [resolved+heuristic]\n  t_dyn src/lib.rs:33 indirect\n  t_direct_a src/lib.rs:29 direct~\n"), "{}", a.to_text());
+    // on the impl: its own test is direct and resolved, the dyn test arrives through the trait
+    let b = ws.tests("<A as T>::m", false).unwrap();
+    let got: Vec<(String, bool, Provenance)> = b.tests.as_ref().unwrap().items.iter().map(|t| (t.name.clone(), t.direct, t.provenance)).collect();
+    assert_eq!(got, vec![("t_direct_a".to_string(), true, Provenance::Resolved), ("t_dyn".to_string(), false, Provenance::Heuristic)]);
+    // B's impl is reached by the dyn test only
+    let c = ws.tests("<B as T>::m", false).unwrap();
+    assert_eq!(names(c.tests.as_ref().unwrap(), |t| t.name.clone()), ["t_dyn"]);
+}
+
+#[test]
+fn test_DW_3_3_an_impl_of_a_std_trait_is_not_flooded_with_std_call_sites() {
+    let (_d, ws) = trait_world(false);
+    {
+        let a = ws.refs("<A as Display>::fmt").unwrap();
+        assert_eq!(a.reference_count, Some(0), "line 26 calls std's Display::fmt: not a use of this impl in the index");
+        assert!(a.refs.as_ref().unwrap().items.is_empty());
+        assert!(a.notes.iter().any(|n| n.contains("trait is not defined in this index") && n.contains("<A as Display>::fmt")), "{:?}", a.notes);
+    }
+    assert!(ws.tests("<A as Display>::fmt", false).unwrap().tests.unwrap().items.is_empty());
+    // a linked impl does not get the note
+    assert!(!ws.refs("<A as T>::m").unwrap().notes.iter().any(|n| n.contains("not defined in this index")));
+}
+
+fn world_of(src: &str, scip: Vec<u8>) -> (tempfile::TempDir, Workspace) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), src).unwrap();
+    let ws = Workspace::new(dir.path().to_path_buf(), dir.path().join("cache"), alsp_index::index_from_scip(&scip).unwrap()).with_limit(usize::MAX);
+    (dir, ws)
+}
+
+#[test]
+fn many_impls_are_capped_and_the_cap_is_said() {
+    use alsp_evidence::MAX_LINKED;
+    let n = MAX_LINKED + 5;
+    let impls: Vec<String> = (0..n).map(|i| format!("impl#[S{i}][T]m().")).collect();
+    let mut defs: Vec<(&str, i32)> = vec![("T#m().", 1)];
+    defs.extend(impls.iter().enumerate().map(|(i, d)| (d.as_str(), 10 + i as i32)));
+    let refs: Vec<(&str, i32)> = impls.iter().enumerate().map(|(i, d)| (d.as_str(), 200 + i as i32)).collect();
+    let (_d, ws) = world_of(&"\n".repeat(300), alsp_evidence::testkit::scip_by_hand(&defs, &refs));
+    let a = ws.refs("T::m").unwrap();
+    assert!(a.notes.iter().any(|x| x.contains(&format!("{n} linked trait/impl methods")) && x.contains(&format!("first {MAX_LINKED}"))), "{:?}", a.notes);
+    assert_eq!(a.reference_count, Some(MAX_LINKED), "one reference per followed impl, none for the rest");
+}
+
+#[test]
+fn same_named_traits_leave_impls_unlinked_and_say_so() {
+    let defs = [("a/T#m().", 0), ("b/T#m().", 1), ("impl#[X][T]m().", 2)];
+    let (_d, ws) = world_of("x\n\n\n", alsp_evidence::testkit::scip_by_hand(&defs, &[("impl#[X][T]m().", 2)]));
+    let a = ws.refs("a::T::m").unwrap();
+    assert!(a.notes.iter().any(|n| n.contains("1 impl method(s) of a::T::m could not be linked")), "{:?}", a.notes);
+}

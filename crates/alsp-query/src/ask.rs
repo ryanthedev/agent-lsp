@@ -5,7 +5,7 @@ use crate::target::{kind_str, Found, Target};
 use crate::{Answer, CoverageAnswer, EntryPoint, Executed, GapItem, RefGroup, Section, SymMatch, TargetError, TargetInfo, TestRef, TreeSources, Workspace};
 use alsp_coverage::{is_test_support_path, observe, CoverageTool, Observed};
 use alsp_decide::DecisionModel;
-use alsp_evidence::{ChangeKind, Edge, EvidencePack, GapReason, Graph, PackSource, Provenance, SymbolEvidence};
+use alsp_evidence::{link_provenance, reach, unlinked_impls_note, ChangeKind, EvidencePack, GapReason, Graph, Hit, PackSource, Provenance, SymbolEvidence, MAX_LINKED};
 use alsp_gaps::{predict, GapsConfig};
 use alsp_index::{Def, SymKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -41,33 +41,55 @@ impl Workspace {
         Ok(a)
     }
 
-    /// Entry points that reach the target (all of its definitions, for a region), nearest first.
-    fn entry_points(&self, graph: &mut Graph, t: &Target, a: &mut Answer) -> Vec<EntryPoint> {
+    /// Entry points that reach the target (all of its definitions, for a region), nearest first,
+    /// and the ids of the symbols that use it directly. Both include what reaches the target's
+    /// trait/impl counterparts, marked by how sure the link is.
+    fn entry_points(&self, graph: &mut Graph, t: &Target, a: &mut Answer) -> (Vec<EntryPoint>, HashSet<String>) {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
+        let mut users = HashSet::new();
         let mut truncated = Vec::new();
+        let mut unlinked = Vec::new();
         for d in &t.defs {
-            let reach = graph.entry_points(d);
-            if reach.truncated {
+            let r = reach(graph, &self.index, d);
+            if r.truncated {
                 truncated.push(d.name.clone());
             }
-            for e in reach.entry_points {
-                if !seen.insert((e.file.clone(), e.line)) {
+            for n in r.notes {
+                if !a.notes.contains(&n) {
+                    a.notes.push(n);
+                }
+            }
+            if d.kind.is_fn() && d.name.contains(" as ") && self.index.links(d).is_empty() {
+                unlinked.push(d.name.clone());
+            }
+            users.extend(r.callers.into_iter().map(|h| h.edge.id));
+            for h in r.entry_points {
+                if !seen.insert((h.edge.file.clone(), h.edge.line)) {
                     continue;
                 }
-                let def = self.index.defs_in(&e.file).find(|x| x.name_line == e.line && x.kind == SymKind::Fn);
-                let kind = match def {
-                    Some(x) if graph.is_test(x) => "test",
-                    _ if e.provenance == Provenance::Resolved => "main",
-                    _ => "pub",
-                };
-                out.push(EntryPoint { name: def.map(|x| x.name.clone()).unwrap_or_else(|| alsp_index::readable_name(&e.id)), kind: kind.into(), file: e.file, line: e.line, provenance: e.provenance });
+                out.push(self.entry_point(graph, h));
             }
         }
         if !truncated.is_empty() {
             a.notes.push(alsp_evidence::incomplete_entry_points_note(&truncated));
         }
-        out
+        if !unlinked.is_empty() {
+            a.notes.push(unlinked_impls_note(&unlinked));
+        }
+        (out, users)
+    }
+
+    fn entry_point(&self, graph: &mut Graph, h: Hit) -> EntryPoint {
+        let (provenance, e) = (h.provenance(), h.edge);
+        let def = self.index.defs_in(&e.file).find(|x| x.name_line == e.line && x.kind == SymKind::Fn);
+        // `main` is told from `pub` by the edge's own provenance, before a link weakens it.
+        let kind = match def {
+            Some(x) if graph.is_test(x) => "test",
+            _ if e.provenance == Provenance::Resolved => "main",
+            _ => "pub",
+        };
+        EntryPoint { name: def.map(|x| x.name.clone()).unwrap_or_else(|| alsp_index::readable_name(&e.id)), kind: kind.into(), file: e.file, line: e.line, provenance }
     }
 
     /// Notes for definitions whose references can only be attributed within their own file.
@@ -88,7 +110,15 @@ impl Workspace {
         // One group per enclosing symbol, in the order its first reference is met.
         let mut list: Vec<RefGroup> = Vec::new();
         let mut at: HashMap<String, usize> = HashMap::new();
+        // Whose references to read: the target's own, then its trait/impl counterparts'.
+        let mut sources: Vec<(&Def, Provenance, Option<String>)> = Vec::new();
         for d in &t.defs {
+            sources.push((d, Provenance::Resolved, None));
+            for l in self.index.links(d).into_iter().take(MAX_LINKED) {
+                sources.push((l.def, link_provenance(l.exact, l.declaration), Some(l.def.name.clone())));
+            }
+        }
+        for (d, provenance, via) in sources {
             for site in self.index.references(&d.key) {
                 // Inside a region the references made from within it are its own business.
                 if t.region && site.file == t.file && t.span.contains(site.line) {
@@ -98,8 +128,9 @@ impl Workspace {
                     Some(u) => (u.key.clone(), u.name.clone(), kind_str(u.kind), u.file.clone(), graph.is_test(u) || is_test_support_path(&u.file)),
                     None => (format!("{}\u{1}", site.file), OUTSIDE.to_string(), "file", site.file.clone(), is_test_support_path(&site.file)),
                 };
+                let key = format!("{key}\u{2}{}", via.as_deref().unwrap_or(""));
                 let i = *at.entry(key).or_insert_with(|| {
-                    list.push(RefGroup { symbol, kind: kind.into(), file, test, lines: Vec::new() });
+                    list.push(RefGroup { symbol, kind: kind.into(), file, test, lines: Vec::new(), provenance, via: via.clone() });
                     list.len() - 1
                 });
                 list[i].lines.push(site.line);
@@ -111,7 +142,7 @@ impl Workspace {
         }
         a.reference_count = Some(list.iter().map(|g| g.lines.len()).sum());
         a.refs = Some(Section::capped(Provenance::Resolved, list, self.limit));
-        let eps = self.entry_points(&mut graph, &t, &mut a);
+        let (eps, _) = self.entry_points(&mut graph, &t, &mut a);
         a.entry_points = Some(Section::capped(Provenance::Resolved, eps, self.limit));
         self.ambiguity_note(&t, &mut a);
         Ok(a)
@@ -124,14 +155,13 @@ impl Workspace {
         let src = TreeSources(&self.tree);
         let mut graph = Graph::new(&self.index, &src);
         let mut a = self.answer("tests", Some(&t));
-        let direct: HashSet<String> = t.defs.iter().flat_map(|d| graph.callers(&d.key)).map(|e| e.id).collect();
-        let eps = self.entry_points(&mut graph, &t, &mut a);
+        let (eps, direct) = self.entry_points(&mut graph, &t, &mut a);
         let tests: Vec<TestRef> = eps
             .into_iter()
             .filter(|e| e.kind == "test")
             .map(|e| {
                 let id = self.index.defs_in(&e.file).find(|x| x.name_line == e.line).map(|x| x.id.clone()).unwrap_or_default();
-                TestRef { name: e.name, file: e.file, line: e.line, direct: direct.contains(&id) }
+                TestRef { name: e.name, file: e.file, line: e.line, direct: direct.contains(&id), provenance: e.provenance }
             })
             .collect();
         let none_found = tests.is_empty();
@@ -231,7 +261,7 @@ impl Workspace {
         let symbols: Vec<SymbolEvidence> = code
             .iter()
             .map(|d| {
-                let entry_points: Vec<Edge> = graph.entry_points(d).entry_points;
+                let entry_points = reach(&mut graph, &self.index, d).entry_points.into_iter().map(Hit::into_edge).collect();
                 SymbolEvidence { id: d.id.clone(), name: d.name.clone(), file: d.file.clone(), span: d.span, kind: ChangeKind::Modified, callers: vec![], entry_points, coverage: None, gaps: vec![] }
             })
             .collect();
