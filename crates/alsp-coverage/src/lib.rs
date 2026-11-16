@@ -112,8 +112,9 @@ struct Failed {
 }
 
 impl Failed {
-    /// `None` when the output shows no failure.
-    fn parse(stdout: &str) -> Option<Failed> {
+    /// `None` when the output shows no failure. A test binary that crashes (abort, segfault, stack
+    /// overflow) prints no `FAILED` line: only cargo's stderr says `error: test failed` / `N target(s) failed`.
+    fn parse(stdout: &str, stderr: &str) -> Option<Failed> {
         let mut names: Vec<String> = Vec::new();
         for line in stdout.lines() {
             if let Some(n) = line.trim_end().strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
@@ -122,7 +123,8 @@ impl Failed {
                 }
             }
         }
-        if names.is_empty() && !stdout.contains("test result: FAILED") {
+        let crashed = stderr.contains("error: test failed, to rerun") || stderr.contains(" target failed") || stderr.contains(" targets failed");
+        if names.is_empty() && !crashed && !stdout.contains("test result: FAILED") {
             return None;
         }
         Some(Failed { first_panic: first_panic(stdout), names })
@@ -233,10 +235,10 @@ fn measure(tool: &CoverageTool, pkg: &Package, src: &PackSource) -> Result<Measu
         }
         out = attempt(branches, ignore_run_fail)?;
     }
-    let failed = if out.success() { Failed::parse(&out.stdout) } else { None };
+    let failed = if out.success() { Failed::parse(&out.stdout, &out.stderr) } else { None };
     if !out.success() {
         let _ = std::fs::remove_file(&out_path);
-        let tests = Failed::parse(&out.stdout).map(|f| format!("; {}", f.summary())).unwrap_or_default();
+        let tests = Failed::parse(&out.stdout, &out.stderr).map(|f| format!("; {}", f.summary())).unwrap_or_default();
         return Err(match out.code {
             Some(c) => format!("`cargo llvm-cov -p {}` exited {c}: {}{tests}", pkg.name, out.stderr),
             None => format!("`cargo llvm-cov -p {}` was killed by a signal: {}{tests}", pkg.name, out.stderr),

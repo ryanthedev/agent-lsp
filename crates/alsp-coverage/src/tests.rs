@@ -233,8 +233,8 @@ fn test_DW_1_5_failing_then_passing_run_measures_afresh_and_has_no_note() {
 
 #[test]
 fn failed_parse_is_none_without_failure_lines_and_dedupes_names() {
-    assert_eq!(Failed::parse("test a ... ok\ntest result: ok. 1 passed\n"), None);
-    let f = Failed::parse("test a::b ... FAILED\ntest a::b ... FAILED\ntest c ... ok\n").unwrap();
+    assert_eq!(Failed::parse("test a ... ok\ntest result: ok. 1 passed\n", ""), None);
+    let f = Failed::parse("test a::b ... FAILED\ntest a::b ... FAILED\ntest c ... ok\n", "").unwrap();
     assert_eq!((f.names, f.first_panic), (vec!["a::b".to_string()], None));
 }
 
@@ -391,4 +391,31 @@ fn test_DW_U_1_a_repeat_look_at_unchanged_code_is_a_cache_hit_whatever_the_cargo
         assert!(observe(&p, &fx.src, &tool).runs()[0].cached, "{k} must not change the cache key");
     }
     assert_eq!(runs(&fx), 1, "tests ran once");
+}
+
+#[test]
+fn test_DW_1_2_a_crashed_test_binary_is_degraded_noted_and_never_cached() {
+    let fx = fx();
+    fx.flag("crash", true);
+    fx.set_test_output("running 1 test\n");
+    let p = pack(symbols());
+    let first = observe(&p, &fx.src, &tool(&fx));
+    assert!(first.runs()[0].error.is_none() && first.runs()[0].degraded, "{:?}", first.runs());
+    assert!(first.notes()[0].contains("some tests failed (names not parsed)"), "{:?}", first.notes());
+    assert_eq!(first.lines_status("src/lib.rs", 1, 7), Hit::Yes, "coverage is kept");
+    assert!(observe(&p, &fx.src, &tool(&fx)).runs()[0].degraded, "the crash is shown again, not served from the cache");
+    assert_eq!(runs_of(&fx).len(), 2);
+    fx.flag("crash", false);
+    fx.set_test_output("running 1 test\ntest a ... ok\n");
+    let clean = observe(&p, &fx.src, &tool(&fx));
+    assert!(!clean.runs()[0].cached && !clean.runs()[0].degraded && clean.notes().is_empty(), "{:?}", clean.notes());
+    assert_eq!(runs_of(&fx).len(), 3, "measured afresh");
+}
+
+#[test]
+fn a_crash_marker_in_stderr_adds_to_names_parsed_from_stdout() {
+    let f = Failed::parse("test a::b ... FAILED\n", "error: 2 targets failed:\n").unwrap();
+    assert_eq!(f.names, vec!["a::b".to_string()]);
+    assert!(Failed::parse("test a ... ok\n", "   Compiling x\nerror: test failed, to rerun pass `-p x`").is_some());
+    assert!(Failed::parse("test a ... ok\n", "warning: unused\n").is_none());
 }

@@ -26,6 +26,7 @@ case "$1" in
       echo "error[E0425]: cannot find value \`zzz\` in this scope" >&2
       echo "error: could not compile \`fx\` (lib) due to 1 previous error" >&2; exit 101
     fi
+    if [ -f "$ALSP_FX/crash" ]; then echo "error: test failed, to rerun pass \`-p fx --lib\`" >&2; echo "error: 1 target failed:" >&2; fi
     if [ -f "$ALSP_FX/fail" ]; then if [ -f "$ALSP_FX/stdout.txt" ]; then cat "$ALSP_FX/stdout.txt"; fi; echo "test t::bad ... FAILED" >&2; echo "error: test failed, to rerun pass --lib" >&2; exit 101; fi
     if [ -f "$ALSP_FX/lock_wait" ]; then echo "    Blocking waiting for file lock on build directory" >&2; sleep 0.3; fi
     while [ $# -gt 0 ]; do [ "$1" = --output-path ] && out="$2"; shift; done
@@ -94,7 +95,7 @@ impl Fx {
         std::fs::write(self.fx.join("stdout.txt"), text).unwrap();
     }
 
-    /// Switch a fake behaviour on: `fail` (crash, exit 101, no report), `compile_fail` (1.5 KB+ of
+    /// Switch a fake behaviour on: `fail` (crash, exit 101, no report), `crash` (a test binary aborts: stderr says `test failed`, stdout has no FAILED line, exit 0 with a report), `compile_fail` (1.5 KB+ of
     /// build noise, then a compile error, exit 101), `no_ignore_run_fail` (rejects that argument as
     /// an older cargo-llvm-cov would), `no_branch`, `no_llvm_cov`, `lock_wait`, `mutants.fail`.
     pub fn flag(&self, name: &str, on: bool) {
