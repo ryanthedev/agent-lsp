@@ -10,10 +10,12 @@
 
 mod build;
 mod hash;
+mod locate;
 mod model;
 mod scip_read;
 
 pub use build::{find_units, Tool};
+pub use locate::{locate_rust_analyzer, locate_rust_analyzer_avoiding, LocateError, Located, Tried};
 pub use hash::{tracked_files, tree_hash};
 pub use model::{readable_name, Def, RefSite, Span, SymKind, SymbolIndex};
 
@@ -222,7 +224,24 @@ pub fn open_index_with(req: &IndexRequest, extra_roots: &[PathBuf]) -> Result<Op
         return Err(IndexError::NoCargoRoot(req.tree.to_path_buf()));
     }
     io(std::fs::create_dir_all(req.cache_dir), "creating the cache directory")?;
-    let salt = format!("{SCHEMA}\n{}", req.tool.version(req.cache_dir).unwrap_or_else(|_| "indexer-unavailable".into()));
+    // The indexer to run, and what goes into the cache key: a different rust-analyzer can read the
+    // same sources differently. `Err` is why none could be found; it fails every root that needs a build.
+    let mut notes = Vec::new();
+    let resolved: Result<(Tool, String), String> = if req.tool.locate {
+        match locate_rust_analyzer_avoiding(req.tree, req.tool.repo_root.as_slice()) {
+            Ok(l) => {
+                if l.is_fallback() {
+                    notes.push(format!("rust-analyzer: {} at {} ({})", l.source, l.path.display(), l.version));
+                }
+                let key = format!("{}\n{}", l.version, l.path.display());
+                Ok((Tool { rust_analyzer: l.path, locate: false, ..req.tool.clone() }, key))
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        req.tool.version(req.cache_dir).map(|v| (req.tool.clone(), v))
+    };
+    let salt = format!("{SCHEMA}\n{}", resolved.as_ref().map_or("indexer-unavailable", |(_, key)| key));
 
     struct Unit {
         rel: PathBuf,
@@ -246,6 +265,9 @@ pub fn open_index_with(req: &IndexRequest, extra_roots: &[PathBuf]) -> Result<Op
     };
 
     if status != IndexStatus::Fresh && req.policy == BuildPolicy::NoBuild {
+        if let (true, Err(why)) = (req.tool.locate, &resolved) {
+            notes.push(why.clone());
+        }
         let units = state
             .iter()
             .map(|u| UnitReport {
@@ -255,7 +277,7 @@ pub fn open_index_with(req: &IndexRequest, extra_roots: &[PathBuf]) -> Result<Op
             })
             .collect();
         return Ok(OpenedIndex {
-            state: IndexState { status, rebuilt: false, units, millis: started.elapsed().as_millis() as u64, notes: Vec::new() },
+            state: IndexState { status, rebuilt: false, units, millis: started.elapsed().as_millis() as u64, notes },
             index: None,
         });
     }
@@ -280,7 +302,10 @@ pub fn open_index_with(req: &IndexRequest, extra_roots: &[PathBuf]) -> Result<Op
         let target = req.cache_dir.join(format!("{}.{}.scip", u.slug, u.hash));
         let tmp = req.cache_dir.join(format!("{}.{}.scip.tmp-{}", u.slug, u.hash, std::process::id()));
         let dir = if u.rel.as_os_str().is_empty() { req.tree.to_path_buf() } else { req.tree.join(&u.rel) };
-        let built = build::run_scip(req.tool, &dir, &tmp)
+        let built = resolved
+            .as_ref()
+            .map_err(|e| e.clone())
+            .and_then(|(tool, _)| build::run_scip(tool, &dir, &tmp))
             .and_then(|_| scip_read::read_scip_file(&tmp, &prefix))
             .and_then(|p| std::fs::rename(&tmp, &target).map(|_| p).map_err(|e| format!("cannot store the index: {e}")));
         match built {
@@ -297,7 +322,7 @@ pub fn open_index_with(req: &IndexRequest, extra_roots: &[PathBuf]) -> Result<Op
     }
     let index = (!parsed.is_empty()).then(|| scip_read::merge(parsed));
     Ok(OpenedIndex {
-        state: IndexState { status, rebuilt, units: reports, millis: started.elapsed().as_millis() as u64, notes: Vec::new() },
+        state: IndexState { status, rebuilt, units: reports, millis: started.elapsed().as_millis() as u64, notes },
         index,
     })
 }

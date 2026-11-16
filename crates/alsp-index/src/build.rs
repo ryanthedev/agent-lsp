@@ -9,8 +9,14 @@ use std::time::{Duration, Instant};
 /// (build scripts that read their own variables), plus `extra_env`.
 #[derive(Clone, Debug)]
 pub struct Tool {
-    /// The rust-analyzer binary; looked up on `PATH` when not a path.
+    /// The rust-analyzer binary; looked up on `PATH` when not a path. Ignored while `locate` is set.
     pub rust_analyzer: PathBuf,
+    /// Find a rust-analyzer per tree with [`crate::locate_rust_analyzer`] (the default) instead of
+    /// running `rust_analyzer` as given.
+    pub locate: bool,
+    /// The repository being analysed when the tree handed to the index is a snapshot of it. With
+    /// `locate`, nothing under it is run to find a rust-analyzer.
+    pub repo_root: Option<PathBuf>,
     pub timeout: Duration,
     pub extra_env: Vec<(String, String)>,
 }
@@ -19,6 +25,8 @@ impl Default for Tool {
     fn default() -> Self {
         Tool {
             rust_analyzer: std::env::var_os("ALSP_RUST_ANALYZER").map(PathBuf::from).unwrap_or_else(|| "rust-analyzer".into()),
+            locate: true,
+            repo_root: None,
             timeout: Duration::from_secs(20 * 60),
             extra_env: Vec::new(),
         }
@@ -26,6 +34,11 @@ impl Default for Tool {
 }
 
 impl Tool {
+    /// Exactly this binary, no discovery.
+    pub fn at(rust_analyzer: impl Into<PathBuf>) -> Tool {
+        Tool { rust_analyzer: rust_analyzer.into(), locate: false, ..Tool::default() }
+    }
+
     /// `rust-analyzer --version`, or the reason it cannot run. Part of the cache key.
     /// Run from `cwd`, which must be outside the repository: the installed `rust-analyzer` is
     /// usually a rustup shim, and rustup picks the binary from the directory it is started in, so
@@ -132,7 +145,7 @@ mod tests {
         let p = dir.join("fake-ra");
         fs::write(&p, format!("#!/bin/sh\n{script_body}\n")).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-        Tool { rust_analyzer: p, timeout: Duration::from_secs(10), extra_env: vec![] }
+        Tool { timeout: Duration::from_secs(10), ..Tool::at(p) }
     }
 
     #[test]
@@ -190,7 +203,7 @@ mod tests {
         slow.timeout = Duration::from_millis(100);
         assert!(run_scip(&slow, d.path(), &out).unwrap_err().contains("timed out"));
 
-        let missing = Tool { rust_analyzer: "/no/such/ra".into(), ..Tool::default() };
+        let missing = Tool::at("/no/such/ra");
         assert!(run_scip(&missing, d.path(), &out).unwrap_err().contains("cannot run"));
         assert!(missing.version(d.path()).unwrap_err().contains("cannot run"));
     }

@@ -237,6 +237,7 @@ pub fn build_pack_with_source(req: &PackRequest) -> Result<(EvidencePack, PackSo
         build_env.push(("CARGO_TARGET_DIR".into(), cache_dir_for(&cache_root, &git.root, "target").to_string_lossy().into_owned()));
     }
 
+    tool.repo_root = Some(git.root.clone());
     let opened = open_index(&IndexRequest { tree: &tree, cache_dir: &index_dir, policy: req.policy, tool: &tool }).map_err(PackError::Index)?;
     let src = RepoSources { git: &git, base: &base, tree: &tree };
     let mut pack = assemble(base.clone(), head, &diffs, opened.state, opened.index.as_ref(), &src);
@@ -461,7 +462,7 @@ mod tests {
         git_cmd(d, &["add", "-A"]);
         git_cmd(d, &["commit", "-q", "-m", "c2"]);
         let c2 = git_cmd(d, &["rev-parse", "HEAD"]);
-        let tool = Tool { rust_analyzer: ra, ..Tool::default() };
+        let tool = Tool::at(ra);
         Fixture { repo, _fx: fx, cache, tool, c1, c2 }
     }
 
