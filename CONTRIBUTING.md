@@ -13,6 +13,10 @@ You need a Rust toolchain and `git` 2.31 or newer. Many tests build small throwa
 
 `alsp` runs the code it analyses: indexing runs build scripts and proc macros, and coverage and gaps run the repository's tests. The same applies when you run its test suite or try your changes on a repository you did not write. Do that only in a sandbox or throwaway VM unless you trust the code. Changes that touch how `alsp` starts `git` or an agent must keep the rules in `docs/query.md` ("Trust and cost") and `docs/review.md` true, and add a test that plants the hostile case.
 
+## Releases and the plugin version
+
+Any change under `skills/` or to a plugin manifest (`.claude-plugin/`, `.codex-plugin/`) must bump the version, in `Cargo.toml` (`[workspace.package]`) and in both `plugin.json` files together. Claude Code refreshes an installed plugin only when its version changes: without a bump, `claude plugin update` answers "already at the latest version" and keeps the old skill in its cache. A test (`crates/alsp-cli/tests/versions.rs`) fails when a manifest version differs from the crate's.
+
 ## Reporting issues
 
 Open an issue on GitHub with the command you ran, `alsp`'s full output including the `!` note lines and exit code, your `rust-analyzer --version`, and whether the repository is a single workspace or has packages with their own `[workspace]`. Do not paste code you are not allowed to share. Report a security problem (a way to make `alsp` run something the docs say it will not) privately to the repository owner rather than in a public issue.

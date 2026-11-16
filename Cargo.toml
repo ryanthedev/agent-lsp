@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/alsp-decide", "crates/alsp-index", "crates/alsp-evidence", "crates/alsp-coverage", "crates/alsp-gaps", "crates/alsp-query", "crates/alsp-review", "crates/alsp-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ryanthedev/agent-lsp"

@@ -18,7 +18,7 @@ The repository root is the plugin root (the marketplace entry has `"source": "./
 curl -fsSL https://raw.githubusercontent.com/ryanthedev/agent-lsp/main/scripts/install.sh | sh
 ```
 
-The script installs the binary and the plugin for every one of `claude`, `codex` and `agy` it finds. To update, re-run it: it rebuilds the binary and refreshes each plugin from the public repository, so all three agents end on the same version. Then run `alsp doctor`. Options and undo commands are in [install.md](install.md).
+The script installs the binary and the plugin for every one of `claude`, `codex` and `agy` it finds. To update, re-run it: it rebuilds the binary and refreshes each plugin from the public repository, so all three agents end on the same version. Then run `alsp doctor`. Claude Code refreshes an installed plugin only when its version changes, so any change under `skills/` or to a plugin manifest must bump the version (see CONTRIBUTING.md). Options and undo commands are in [install.md](install.md).
 
 The by-hand commands, one agent at a time (each installs the skill only):
 

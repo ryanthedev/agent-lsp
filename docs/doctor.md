@@ -4,7 +4,7 @@
 
 ```
 $ alsp doctor
-ready     alsp (required): 0.1.0
+ready     alsp (required): 0.2.0
 ready     git (required): git version 2.50.1 (/usr/bin/git)
 ready     repository (optional): /work/project
 ready     rust-analyzer (required): rust-analyzer 1.95.0 (/Users/me/.cargo/bin/rust-analyzer; PATH)

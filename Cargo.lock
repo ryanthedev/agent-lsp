@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "alsp-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alsp-coverage",
  "alsp-decide",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "alsp-coverage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alsp-coverage",
  "alsp-evidence",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "alsp-decide"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alsp-decide",
  "libc",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "alsp-evidence"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alsp-evidence",
  "alsp-index",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "alsp-gaps"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alsp-coverage",
  "alsp-decide",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "alsp-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "protobuf",
  "scip",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "alsp-query"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alsp-coverage",
  "alsp-decide",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "alsp-review"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alsp-decide",
  "alsp-evidence",
