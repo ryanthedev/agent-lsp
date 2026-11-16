@@ -17,7 +17,7 @@ mod scip_read;
 pub use build::{find_units, Tool};
 pub use locate::{locate_rust_analyzer, locate_rust_analyzer_avoiding, LocateError, Located, Tried};
 pub use hash::{tracked_files, tree_hash};
-pub use model::{readable_name, Def, RefSite, Span, SymKind, SymbolIndex};
+pub use model::{readable_name, Def, Linked, RefSite, Span, SymKind, SymbolIndex};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

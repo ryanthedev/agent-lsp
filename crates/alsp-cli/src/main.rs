@@ -3,6 +3,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod doctor;
 mod pack;
 mod query;
 mod review;
@@ -35,6 +36,8 @@ enum Command {
     Help { topic: Vec<String> },
     /// Review a diff with mechanical evidence and optional read-only agents.
     Review(review::Args),
+    /// Check that everything alsp needs is installed and print the fix for what is not (changes nothing, spends nothing). Exit 1: a required tool is missing.
+    Doctor(doctor::Args),
     /// Append a verdict or inspect the review ledger.
     Ledger { #[command(subcommand)] command: LedgerCommand },
 }
@@ -73,6 +76,7 @@ fn main() -> ExitCode {
         Command::Help { topic } => help(&topic),
         Command::Pack(args) => pack::run(args),
         Command::Review(args) => review::run(args),
+        Command::Doctor(args) => doctor::run(args),
         Command::Ledger { command } => match command {
             LedgerCommand::Mark { id, verdict, repo } if verdict == "held" || verdict == "not-held" => match alsp_review::mark(&repo, &id, &verdict) {
                 Ok(0) => fail("finding id not found"), Ok(n) => { println!("marked {n} ledger row(s) {verdict}"); ExitCode::SUCCESS }, Err(e) => fail(&e.to_string()),
