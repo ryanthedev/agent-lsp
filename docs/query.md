@@ -1,8 +1,12 @@
 # Symbol queries
 
-`alsp sym | refs | tests | cover | gaps` answer questions about a Rust repository without a diff: where is this defined, who uses it, which tests reach it, did the tests run it, would the tests catch a bug here. `alsp` with no arguments, and `alsp help agents`, print a one-screen cheat sheet for agents. Diff questions stay with `alsp pack` and `alsp review` (docs/review.md).
+`alsp outline | prep | sym | refs | tests | cover | gaps` answer questions about a Rust repository without a diff: what a file or dependency crate declares, a batched edit/impact brief before refactoring, where a symbol is defined, who uses it, which tests reach it, did the tests run it, would the tests catch a bug here. `alsp` with no arguments, and `alsp help agents`, print a one-screen cheat sheet for agents. Diff questions stay with `alsp pack` and `alsp review` (docs/review.md).
 
 ```
+alsp outline [paths...] [--pub] [--dep <crate>] [--repo <path>] [--json]
+                               instant syn-powered structural skeleton of local files or a dep crate
+alsp prep  <targets...> [--budget <n> | --all] [--repo <path>] [--json] [--no-build] [--root <dir>] [--cache-dir <dir>]
+                               batched edit/impact brief: declaration, collisions, callers, links, tests
 alsp sym   <target>            definitions, kind, reference count (lists every match)
 alsp refs  <target>            references grouped by enclosing symbol; tests marked; entry points reached
 alsp tests <target> [--run]    tests that reach it; --run: do the package's tests execute it
@@ -10,13 +14,13 @@ alsp cover <target>            line and branch coverage of its span
 alsp gaps  <target>            mutants in its span and the predicted chance the tests catch each
 ```
 
-Flags on every query: `--repo <path>` (any directory inside the work tree; default: the git repository of the current directory), `--json`, `--all`, `--no-build`, `--root <dir>` (repeatable), `--cache-dir <dir>`. `gaps` also takes `--gap-budget <n>` (most mutants sent to the model, default 100) and `--gap-threshold <p>` (a predicted gap is reported below this chance of being caught, default 0.50).
+Flags on index-backed queries (`sym`, `refs`, `tests`, `cover`, `gaps`, `prep`): `--repo <path>` (any directory inside the work tree; default: the git repository of the current directory), `--json`, `--all`, `--no-build`, `--root <dir>` (repeatable), `--cache-dir <dir>`. `prep` also takes `--budget <n>` (approximate token budget for text output, default 1500; conflicts with `--all`). `gaps` also takes `--gap-budget <n>` (most mutants sent to the model, default 100) and `--gap-threshold <p>` (a predicted gap is reported below this chance of being caught, default 0.50). `outline` takes optional `[paths...]` (default: `src/` if present, else `.`), `--pub` (public items, public fields, trait impls, and public impl methods only), `--dep <crate>` (locate and outline a dependency crate via `cargo metadata`), `--repo <path>`, and `--json`.
 
 ## Targets
 
 A target is a symbol name or `file:line`.
 
-- **Name.** Exact (`net::handle_request`, the qualified name the answer prints) or a suffix that starts at a `::` boundary (`handle_request`, `net::handle_request`). An exact match wins over suffix matches. A name that matches several definitions is never guessed: `sym` lists them all (exit 0); every other command prints the candidates and exits 4. Repeat the command with a longer name or with `file:line`.
+- **Name.** Exact (`net::handle_request`, the qualified name the answer prints) or a suffix that starts at a `::` boundary (`handle_request`, `net::handle_request`). Enum variants are indexed as `variant` symbols (`Enum::Variant`, e.g. `alsp refs Status::Ready` or `alsp sym Ready`) and work across `sym`, `refs`, `tests`, and `prep`. An exact match wins over suffix matches. A name that matches several definitions is never guessed: `sym` lists them all (exit 0); every other command prints the candidates and exits 4. Repeat the command with a longer name or with `file:line`.
 - **`file:line`.** The file is repo-relative (`apps/foo/rust/src/net.rs`), absolute, relative to the current directory, or a unique path suffix (`net.rs`). The target is the innermost function, type, const or static whose span holds the line. A line in no such item (a comment between items, imports) targets the whole file: its definitions together, and for `refs` and `tests` only the uses from other files. A file with no indexed items still answers (an empty list and a note).
 - **Module.** A module name targets the module's span and the definitions inside it.
 - No match: exit 4, with the nearest names (a similar last segment) or files.
@@ -53,6 +57,8 @@ entry(2) [resolved+heuristic]
 - First line: command, target, index state (`fresh`, `stale` or `missing`, `+rebuilt` when the indexer ran for this query), the checked-out commit.
 - `target KIND FILE:SPAN [resolved]`; a whole file is `1-end`.
 - `! ...` lines are notes: caveats the reader needs to weigh the facts. A dirty working tree is one: the index always describes the working tree (it is rebuilt when its sources changed), and the note names the uncommitted Rust and Cargo files so a stale mental model of `HEAD` is not mistaken for the index. Others: a root that failed to index, an entry-point search that hit its limit, references that cannot be attributed (same symbol id in several crate roots), why a measurement is missing.
+- `outline`: first line `outline <paths> [resolved]`, optional `! ...` notes, then `=== FILE (N lines) ===` followed by indented single-line item signatures with `L<start>` or `L<start>-<end>` spans.
+- `prep`: first line `prep index=<status>[+rebuilt] @<head>[ budget=<N>]`, optional `! ...` notes, then `=== KIND NAME FILE:SPAN [resolved] ===` per resolved target with `decl [resolved]` (body-free declaration), `collisions(N) [resolved]`, `links(N) [...]` (trait/impl links), `refs(SITES in GROUPS symbols) [...]` (production callers before `[test]` callers), and `tests(N) [...]` (direct before indirect). When a token budget is active (default 1500, `--budget <n>`, lifted by `--all`), lower-priority lists are trimmed first while preserving each target's header, declaration, omitted count, and any target-resolution errors. Any unresolved targets are printed after the resolved items and the command exits 4.
 - `sym`: `matches(N) [resolved]`, then `KIND NAME FILE:LINE refs=N` (the line of the name).
 - `refs`: `refs(SITES in GROUPS symbols)`, then `SYMBOL FILE:LINES` with `[test]` when the enclosing symbol is a `#[test]` function or lives under `tests/`; then `entry(N)`, then `KIND NAME FILE:LINE` with kind `test`, `main` or `pub`. References that sit in no indexed symbol (macro-generated code the index gives no span for) are grouped under `<outside any symbol>`; imports appear under their module. A group made of uses of a trait method's impl (or of an impl method's trait) ends `via <A as T>::m` (what the sites actually resolve to), with `~` when heuristic; see "Trait methods and their impls" below.
 - `tests`: `tests(N) [resolved]`, then `NAME FILE:LINE direct|indirect` (the test uses the target itself, or reaches it through other functions), nearest first, `~` after a test found only across a heuristic trait/impl link. With `--run`: `executed: yes|no|unknown (HIT/TOTAL lines ran) [observed]`.
@@ -67,21 +73,44 @@ entry(2) [resolved+heuristic]
 | Key | Meaning |
 |---|---|
 | `schema` | Schema version, `1`. |
-| `command` | `sym`, `refs`, `tests`, `cover` or `gaps`. |
-| `target` | Absent for `sym`. `kind` (`fn`, `const`, `static`, `struct`, `enum`, `trait`, `type`, `macro`, `mod`, or `module` / `file` for a region), `name`, `file`, `span` (`start`, `end`; a whole file ends at 4294967295). |
-| `index` | `status` (`fresh`, `stale`, `missing`), `rebuilt` (the indexer ran for this query), `head` (checked-out commit), `dirty` (uncommitted Rust and Cargo files). |
+| `command` | `sym`, `refs`, `tests`, `cover`, `gaps`, `prep` or `outline`. |
+| `target` | Absent for `sym`, `outline`, and top-level `prep` (present inside each `prep` item). `kind` (`fn`, `const`, `static`, `struct`, `enum`, `variant`, `trait`, `type`, `macro`, `mod`, or `module` / `file` for a region), `name`, `file`, `span` (`start`, `end`; a whole file ends at 4294967295). |
+| `index` | Absent for `outline`. `status` (`fresh`, `stale`, `missing`), `rebuilt` (the indexer ran for this query), `head` (checked-out commit), `dirty` (uncommitted Rust and Cargo files). |
 | `notes` | Strings: the `!` lines. |
 | `matches` | `sym` only. A list section (below) of `name`, `kind`, `file`, `line` (of the name), `span`, `references`. |
-| `reference_count` | `refs` only. Reference sites before grouping. |
-| `refs` | `refs` only. A list section of groups: `symbol`, `kind`, `file`, `test`, `lines`, `provenance` of the group, and `via` (absent for a direct use of the target: the trait or impl method the sites resolve to). |
+| `reference_count` | `refs` and `prep` items. Reference sites before grouping. |
+| `refs` | `refs` and `prep` items. A list section of groups: `symbol`, `kind`, `file`, `test`, `lines`, `provenance` of the group, and `via` (absent for a direct use of the target: the trait or impl method the sites resolve to). |
 | `entry_points` | `refs` only. A list section of `name`, `kind` (`test`, `main`, `pub`), `file`, `line`, `provenance` of each. |
-| `tests` | `tests` only. A list section of `name`, `file`, `line`, `direct`, `provenance`. |
+| `tests` | `tests` and `prep` items. A list section of `name`, `file`, `line`, `direct`, `provenance`. |
 | `executed` | `tests --run` only. `provenance`, `status` (`yes`, `no`, `unknown`), `lines_hit`, `lines_total`. |
 | `coverage` | `cover` only; absent when nothing was measured or the span has no instrumented line. `provenance`, `lines_total`, `lines_hit`, `branches_total`, `branches_hit` (null when the toolchain cannot count branches), `uncovered_lines`. |
 | `gaps` | `gaps` only. A list section of `file`, `line`, `mutation`, `p_tests_catch` (0 for lines no test runs), `provenance` of each (`observed` or `predicted`). |
 | `unavailable` | Why a needed measurement is missing; the exit code is then 5. |
 
 A **list section** is `{"provenance", "total", "omitted", "items"}`: `provenance` of the whole list, `total` everything found, `omitted` what the cap left out, `items` the facts shown.
+
+`outline --json` emits:
+
+| Key | Meaning |
+|---|---|
+| `schema` | `1`. |
+| `command` | `outline`. |
+| `provenance` | `resolved` (parsed directly from source with `syn`). |
+| `files` | Array of outlined files, each with `file`, `lines` (line count), and `items`. |
+| `items` | Array of structural items, each with `kind` (`struct`, `enum`, `trait`, `impl`, `fn`, `const`, `static`, `type`, `union`, `mod`, `macro`, `field`, `variant`), `vis` (visibility string, empty when private/inherited), `name`, `signature` (compact single-line declaration), `span` (`start`, `end`), and `children` (recursive array of child items). |
+| `notes` | Strings: the `!` lines (for example files skipped or truncated). |
+
+`prep --json` emits:
+
+| Key | Meaning |
+|---|---|
+| `schema` | `1`. |
+| `command` | `prep`. |
+| `index` | Index freshness object (same as above). |
+| `notes` | Strings: the `!` lines. |
+| `budget_tokens` | Active approximate token budget for text output; absent when `--all` is set. |
+| `items` | Array of resolved target briefs, each with `target`, `declaration` (body-free declaration string, or null for regions), `collisions` (other qualified symbols sharing the same short name), `reference_count`, `refs` (list section), `links` (array of trait/impl links, each with `name`, `kind` (`trait` or `impl`), `file`, `line`, `provenance`), and `tests` (list section). |
+| `errors` | Array of target-resolution errors for any target in the batch that failed to resolve; each entry has `query`, `error` (`no_match` or `ambiguous`), `nearest`, `candidates`, `omitted`, and `hint`. Non-empty `errors` exits 4 while still printing all resolved `items`. |
 
 A target error (exit 4) is printed on stdout in the same mode, and its `hint`, which says what to do next, is also on stderr. JSON keys:
 
@@ -102,9 +131,9 @@ Text: `no match for ...` followed by `nearest:`, or `... is ambiguous: N candida
 | Code | Meaning |
 |---|---|
 | 0 | Answered. |
-| 2 | Usage error, not a git work tree, no `Cargo.toml`, or another failure; stderr says what to do. |
+| 2 | Usage error, not a git work tree, no `Cargo.toml`, invalid `outline` path / symlink escape / syntax error / unknown `--dep`, or another failure; stderr says what to do. |
 | 3 | No index could be served: `--no-build` with a stale or missing cache, or every Cargo root failed to index. `alsp pack` and `alsp review` use it too: they still print what they have, an `Index:` line (status, each failed root and why, the indexer's notes) and a note that an empty symbol list means unknown, not unchanged. A partial index (some roots failed) exits 0 and names the failed roots in the `Index:` line. |
-| 4 | The target matches nothing, or `refs`, `tests`, `cover` or `gaps` got an ambiguous name. Candidates or nearest names are on stdout. |
+| 4 | The target matches nothing, or `refs`, `tests`, `cover`, `gaps` or `prep` got an ambiguous or missing name (for `prep`, all resolved targets are still printed alongside the errors). Candidates or nearest names are on stdout. |
 | 5 | A measurement the question needs could not be made (the package does not build, `cargo-llvm-cov` missing, mutants not listable, sdd `decide` unavailable). The answer is still printed, with the cause in its notes and `unavailable`. Failing tests are not in this list: see below. |
 
 Failing tests do not make coverage unavailable. `cover`, `gaps`, `tests --run` and `pack --with coverage` run `cargo llvm-cov --ignore-run-fail`, so a package whose tests build but partly fail still yields observed coverage. The answer exits 0 and carries a note: `coverage for package P was observed, but N tests failed: a::b, c::d - first panic: ...; lines those tests reach may be under-counted; fix the cause ... and rerun` (at most five names, then `and N more`; `some tests failed (names not parsed)` when libtest's output names none). A frequent cause is an environment variable the tests expect; set it in the environment you run `alsp` from and rerun. A report made with failing tests is not cached, so the next run measures afresh and a degraded report is never served as a clean one. A `cargo-llvm-cov` too old to know `--ignore-run-fail` is retried without it, and then failing tests are unavailable (exit 5), with the failed tests named in the note.
@@ -121,7 +150,9 @@ When the repository root has a `Cargo.toml`, the index covers that workspace. A 
 
 **Building the index runs the repository's code.** rust-analyzer, which `alsp` runs to index, builds the workspace's build scripts and proc macros and reads the repository's cargo configuration (`.cargo/config.toml`, for example a `rustc-wrapper`). Every command without `--no-build` therefore executes code from the repository, and so do `alsp pack` and `alsp review` (`alsp review` has no `--no-build`). Checked 2026-11-15 with rust-analyzer 1.99.0-nightly: `rust-analyzer scip` ignores `cargo.buildScripts.enable` and `procMacro.enable` in its `--config-path` file, and even with the build-script command overridden to do nothing the repository's `rustc-wrapper` still ran, so `alsp` has no "safe indexing" mode and does not pretend to have one.
 
-`--no-build` stops that indexing and nothing else: it never runs rust-analyzer to index, and serves only a cached index (built earlier, for example on code you trust), exiting 3 when there is none. Its one remaining spawn is `rust-analyzer --version` (part of the cache key), started from the cache directory, outside the repository, so a repository's `rust-toolchain.toml` does not choose the binary. Only `sym`, `refs`, `tests` without `--run`, and `alsp pack` without `--with` are therefore safe on a repository you do not trust, and only with `--no-build`.  With no cache, read the code as text or run `alsp` inside a sandbox or throwaway VM.
+`--no-build` stops that indexing and nothing else: it never runs rust-analyzer to index, and serves only a cached index (built earlier, for example on code you trust), exiting 3 when there is none. Its one remaining spawn is `rust-analyzer --version` (part of the cache key), started from the cache directory, outside the repository, so a repository's `rust-toolchain.toml` does not choose the binary. Only `sym`, `refs`, `tests` without `--run`, `prep`, and `alsp pack` without `--with` are therefore safe on a repository you do not trust, and only with `--no-build`. With no cache, read the code as text or run `alsp` inside a sandbox or throwaway VM.
+
+**Local `alsp outline` executes no repository code.** Given local paths (without `--dep`), `alsp outline` reads `.rs` files directly and parses them with `syn`: no `rust-analyzer`, no `cargo`, no build scripts, no proc macros, and no `git`. Directory traversal checks `symlink_metadata` and refuses symlinks escaping the repository root as well as symlink loops, so local-path `alsp outline` is safe on untrusted code. By contrast, `alsp outline --dep <crate>` runs `cargo metadata` in the repository to locate the dependency crate's source tree (reading the repository's Cargo configuration and manifests) and is **not** safe on untrusted code.
 
 **The repository's own git config.** A repository handed over as an archive or a directory carries its own `.git/config`, which git obeys and which can name programs to run (`core.fsmonitor`, `diff.external`, `diff.<driver>.textconv`, `filter.<name>.clean|smudge|process`, `core.hooksPath`, `core.pager`, `core.sshCommand`, a gpg program, a remote's `uploadpack` or an `ext::` URL). Every `git` that `alsp` starts goes through one helper that forces those settings off through git's `GIT_CONFIG_COUNT` environment (which outranks every config file, included files too), empties the clean, smudge and process commands of every filter the repository's own config defines (including ones pulled in by `include.path`), passes `--no-ext-diff --no-textconv` to every diff and show, refuses every network and program transport (`protocol.*.allow=never`, `GIT_PROTOCOL_FROM_USER=0`) and never fetches a missing object (`GIT_NO_LAZY_FETCH=1`), ignores the system config, and never pages or prompts. It does not enter submodules: status and diff of the work tree run with `--ignore-submodules=all`, and the review snapshot leaves each submodule at the commit `HEAD` records, because git would otherwise read the submodule's own config, whose filters `alsp` cannot list ahead of time. If git cannot list the repository's filters (an unreadable config, say), `alsp` refuses to run git at all rather than run it without the overrides. git runs with the repository's own `.git/config` neutralized this way, so `sym`, `refs`, `pack` without `--with` and the ad-hoc `review` snapshot start none of those programs (tests plant each one, in the repository, in a submodule and in a partial clone's remote, and check, and check that plain git does start them). It needs git 2.31 or newer; `alsp` refuses an older git. Before 2.44, git ignores `GIT_NO_LAZY_FETCH`, so a partial clone relies on the refused transports alone, which the tests show is enough on the git they ran against.
 

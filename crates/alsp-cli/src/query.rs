@@ -17,9 +17,11 @@ use std::process::ExitCode;
 /// The short guide an agent reads first: `alsp` with no arguments and `alsp help agents`.
 pub const AGENT_HELP: &str = "\
 alsp: answers about Rust code, for agents. Every fact is marked with how it was found: [resolved]
-by the rust-analyzer index, [observed] by running tests, [predicted] by a model; ~ marks a heuristic.
+by the rust-analyzer index (or syn for outline), [observed] by running tests, [predicted] by a model; ~ marks a heuristic.
 
-Ask about a symbol (a name or a unique suffix such as net::send_frame) or file:line:
+Ask about files, symbols (exact, :: suffix, Enum::Variant) or file:line:
+  alsp outline [paths] [--pub] [--dep <crate>]   instant syn skeleton of files or a dep crate
+  alsp prep <targets...> [--budget <n>|--all]    batched brief: decl, collisions, refs, links, tests
   alsp sym <name>       where it is defined, its kind, how often it is used (lists every match)
   alsp refs <target>    who uses it, grouped by enclosing symbol, tests marked, entry points
   alsp tests <target>   tests that reach it; --run adds whether the package's tests execute it
@@ -30,14 +32,12 @@ Ask about a symbol (a name or a unique suffix such as net::send_frame) or file:l
 Ask about a diff:
   alsp pack --base <rev> [--head <rev>] [--with coverage,gaps]   changed symbols and callers
   alsp review [--base <rev>] [--quick|--full] [--agent codex|claude|agy]
-      evidence plus an agent review. No arguments: everything since the last review, uncommitted work
-      included. --quick: mechanical evidence only (no agents, no tests run), with the changed symbols
-      to pass to cover/gaps; --full: also measures coverage and gaps
+      No arguments: everything since the last review (uncommitted included). --quick: mechanical
+      evidence only (no agents, no tests); --full: also measures coverage and gaps
 
-Flags on every query: --repo <path> (default: the git repo of the current directory),
-  --json (stable schema), --all (no list caps), --no-build (index from a cached index only, never
-  by running rust-analyzer; see Trust; the first index of a large repo takes about 30 s, then it is
-  cached), --root <dir> (also index a Cargo package outside the root workspace, e.g. apps/foo/rust).
+Flags on indexed queries: --repo <path> (default: current git repo), --json (stable schema),
+  --all (no list caps), --no-build (cached index only, never runs rust-analyzer; first index ~30s),
+  --root <dir> (also index a Cargo package outside the root workspace, e.g. apps/foo/rust).
 
 Exit codes: 0 answered | 2 usage or other error | 3 no index could be served (stderr says why)
   | 4 target not found or ambiguous (candidates or nearest names are printed)
@@ -49,10 +49,10 @@ Trust: building the index runs the repository's build scripts, proc macros and c
 tests does the same and more: cover, gaps, `tests --run`, `pack --with` and `review --full` or
 `--with` run the repository's tests, and --no-build does NOT stop that. Only sym, refs, `tests`
 without --run and `pack` without --with are safe on untrusted code, and only with --no-build
-(cached index, exit 3 without one); alsp runs git with the repository's own .git/config neutralized
-(fsmonitor, hooks, external diff, textconv, filters, remote programs; no submodules, no fetch; git
-2.31+). Not covered: filters in your own global git config (git-lfs) still run, and system-level
-config is ignored. gaps sends function bodies to Google's Gemini through sdd's `decide` command (spend is recorded by sdd). Otherwise run alsp in a sandbox.
+(same for `prep --no-build`; local `outline` reads files only and is safe, `--dep` runs cargo).
+alsp runs git with the repository's own .git/config neutralized (fsmonitor, hooks, external diff,
+textconv, filters, remote programs; no submodules, no fetch; git 2.31+); filters in your own global
+git config (git-lfs) still run, and system-level config is ignored. gaps sends code to Gemini via sdd. Otherwise run alsp in a sandbox.
 
 Reference: docs/query.md
 ";
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn test_DW_4_4_the_cheat_sheet_is_short_and_names_every_command_and_exit_code() {
         assert!(AGENT_HELP.lines().count() < 40, "{} lines", AGENT_HELP.lines().count());
-        for word in ["alsp sym", "alsp refs", "alsp tests", "alsp cover", "alsp gaps", "alsp pack", "alsp review", "--json", "--all", "--repo", "docs/query.md", "[resolved]", "[observed]", "[predicted]"] {
+        for word in ["alsp outline", "alsp prep", "alsp sym", "alsp refs", "alsp tests", "alsp cover", "alsp gaps", "alsp pack", "alsp review", "--json", "--all", "--repo", "docs/query.md", "[resolved]", "[observed]", "[predicted]"] {
             assert!(AGENT_HELP.contains(word), "{word}");
         }
         for exit in ["0 answered", "2 usage", "3 no index", "4 target", "5 a needed"] {

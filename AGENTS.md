@@ -19,7 +19,7 @@ Run the full suite before you report a change as done. Tests that read documenta
 | `alsp-cli` | argument parsing, text and JSON output, the agent cheat sheet |
 | `alsp-index` | runs `rust-analyzer scip` per Cargo root, caches the index by content hash, answers definition and reference queries |
 | `alsp-evidence` | evidence pack for a git diff: changed symbols, callers, entry points |
-| `alsp-query` | symbol queries without a diff (`sym`, `refs`, `tests`) |
+| `alsp-query` | symbol queries without a diff (`outline`, `prep`, `sym`, `refs`, `tests`) |
 | `alsp-coverage` | `cargo llvm-cov` coverage per symbol, cached |
 | `alsp-gaps` | mutants from `cargo mutants --list`, scored by a decision model, never run |
 | `alsp-decide` | client for sdd's `decide` command |
@@ -38,4 +38,4 @@ Run the full suite before you report a change as done. Tests that read documenta
 
 ## Running alsp on untrusted code
 
-Indexing and test runs execute the repository's code. Do not point your own built `alsp` at a repository you do not trust, except `sym`, `refs` and `tests` (without `--run`) with `--no-build` against a cache you built earlier.
+Indexing and test runs execute the repository's code. Do not point your own built `alsp` at a repository you do not trust, except local `outline` (without `--dep`), or `sym`, `refs`, `tests` (without `--run`), and `prep` with `--no-build` against a cache you built earlier.

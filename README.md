@@ -1,6 +1,6 @@
 # alsp
 
-`alsp` is a command-line tool that gives coding agents evidence about Rust code. An agent asked "who calls this?" or "is this tested?" usually greps and guesses. `alsp` answers from a rust-analyzer index (type-resolved definitions, references and tests) and from measurements (coverage from `cargo llvm-cov`, mutants from `cargo mutants --list` scored by a decision model), and it marks every fact with how it was found. It is a plain program with text and JSON output, so Claude Code, Codex and agy use it the same way, and a plugin skill teaches each of them when to reach for it.
+`alsp` is a command-line tool that gives coding agents evidence about Rust code. An agent asked "what's in this file?", "who calls this?", or "is this tested?" usually reads whole files or greps and guesses. `alsp` answers from instant `syn`-powered file and dependency-crate outlines (`outline`), a rust-analyzer index (batched edit briefs via `prep`, plus type-resolved definitions, references including enum variants, and tests), and measurements (coverage from `cargo llvm-cov`, mutants from `cargo mutants --list` scored by a decision model), and it marks every fact with how it was found. It is a plain program with text and JSON output, so Claude Code, Codex and agy use it the same way, and a plugin skill teaches each of them when to reach for it.
 
 ## What you need
 
@@ -44,11 +44,13 @@ tests(2) [resolved]
   tests::split_markdown_row_handles_escaped_pipes_and_edges crates/alsp-review/src/lib.rs:957 direct
   tests::test_DW_4_7_imports_the_ten_historical_gap_verdicts crates/alsp-review/src/lib.rs:827 indirect
 
+$ alsp outline crates/alsp-review/src/lib.rs --pub   # instant syn skeleton (or --dep <crate>)
+$ alsp prep split_markdown_row                       # batched declaration, collisions, callers, links, tests
 $ alsp cover split_markdown_row     # runs the package's tests under cargo llvm-cov
 $ alsp review --quick               # evidence for everything changed since the last review
 ```
 
-`alsp` with no arguments prints a one-screen cheat sheet meant for agents. `alsp gaps <symbol>` lists the mutants in a symbol and the predicted chance the tests catch each.
+`alsp` with no arguments prints a one-screen cheat sheet meant for agents. `alsp refs Enum::Variant` finds uses of an enum variant. `alsp gaps <symbol>` lists the mutants in a symbol and the predicted chance the tests catch each.
 
 ## Provenance marks
 
@@ -69,7 +71,7 @@ The plugin is one skill, `skills/alsp/SKILL.md`, that teaches Claude Code, Codex
 
 ## Trust and cost
 
-Indexing runs the repository's build scripts and proc macros, because rust-analyzer does. `cover`, `gaps`, `tests --run` and `review --full` also build and run its tests, and `gaps` sends function bodies to Google's Gemini API. Point `alsp` only at code you trust; `--no-build` makes `sym`, `refs` and `tests` (without `--run`) safe on untrusted code, but only against a cached index. Review agents run in a throwaway export of the commit, which is not a sandbox. The details are in [docs/query.md](docs/query.md), "Trust and cost", and [docs/review.md](docs/review.md).
+Local `alsp outline` (without `--dep`) reads `.rs` files directly and parses them with `syn` (symlink-guarded, no `cargo`, no `rust-analyzer`), so it is safe on untrusted code; `alsp outline --dep <crate>` runs `cargo metadata` and is not. Indexing runs the repository's build scripts and proc macros, because rust-analyzer does. `cover`, `gaps`, `tests --run` and `review --full` also build and run its tests, and `gaps` sends function bodies to Google's Gemini API. Point `alsp` only at code you trust; `--no-build` makes `sym`, `refs`, `tests` (without `--run`), and `prep` safe on untrusted code, but only against a cached index. Review agents run in a throwaway export of the commit, which is not a sandbox. The details are in [docs/query.md](docs/query.md), "Trust and cost", and [docs/review.md](docs/review.md).
 
 ## Documentation
 

@@ -387,7 +387,13 @@ fn gaps_without_sdd_keeps_the_unrun_gaps_and_exits_5() {
 #[test]
 fn test_DW_4_2_every_json_key_is_documented() {
     let docs = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/query.md")).expect("docs/query.md exists");
-    let e = Env::new(LIB, &[("src/other.rs", "fn leaf() {}\n")]);
+    let e = Env::new(
+        LIB,
+        &[
+            ("src/other.rs", "fn leaf() {}\n"),
+            ("src/types.rs", "pub struct Boxed { pub val: u32 }\npub enum Mode { Fast, Slow(u8) }\n"),
+        ],
+    );
     let stub = { let f = FakeSdd::new("ok"); f.p(0.2); f.tokens(10); f };
     let mut seen = std::collections::BTreeSet::new();
     fn keys(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
@@ -408,11 +414,29 @@ fn test_DW_4_2_every_json_key_is_documented() {
         (vec!["gaps", "lib::leaf", "--json"], Some(&stub)),
         (vec!["refs", "leaf", "--json"], None),
         (vec!["sym", "lef", "--json"], None),
+        // `prep` with resolved target (having a collision), a missing target, and an ambiguous target.
+        (vec!["prep", "lib::leaf", "lef", "leaf", "--json"], None),
     ];
     for (args, sdd) in runs {
         keys(&json(&e.run(&args, sdd)), &mut seen);
     }
-    assert!(seen.len() > 30, "{seen:?}");
+    // `prep` on a trait method exercises non-empty `links` (`PrepLink` keys).
+    let te = trait_env(false);
+    keys(&json(&te.run(&["prep", "T::m", "--json"], None)), &mut seen);
+    // `outline` exercises top-level, `FileOutline`, and nested `OutlineItem` (`children`) keys.
+    let outline_out = Command::new(env!("CARGO_BIN_EXE_alsp"))
+        .args(["outline", "src/types.rs", "--repo"])
+        .arg(&e.repo)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(outline_out.status.code(), Some(0), "{}", err(&outline_out));
+    keys(&json(&outline_out), &mut seen);
+
+    assert!(seen.len() > 40, "{seen:?}");
+    for expected in ["files", "signature", "vis", "children", "budget_tokens", "declaration", "collisions", "links", "errors"] {
+        assert!(seen.contains(expected), "expected `{expected}` to be exercised in JSON output: {seen:?}");
+    }
     let missing: Vec<&String> = seen.iter().filter(|k| !docs.contains(&format!("`{k}`"))).collect();
     assert!(missing.is_empty(), "undocumented JSON keys: {missing:?}");
 }
