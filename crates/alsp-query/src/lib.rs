@@ -15,6 +15,7 @@
 
 mod answer;
 mod ask;
+pub mod outline;
 mod target;
 
 pub use answer::*;

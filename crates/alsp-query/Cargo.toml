@@ -14,8 +14,11 @@ alsp-index = { path = "../alsp-index" }
 alsp-evidence = { path = "../alsp-evidence" }
 alsp-coverage = { path = "../alsp-coverage" }
 alsp-gaps = { path = "../alsp-gaps" }
+proc-macro2.workspace = true
+quote.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+syn.workspace = true
 
 [dev-dependencies]
 alsp-coverage = { path = "../alsp-coverage", features = ["testkit"] }

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod doctor;
+mod outline;
 mod pack;
 mod query;
 mod review;
@@ -32,6 +33,8 @@ enum Command {
     Cover(query::Common),
     /// Mutants in a symbol's span and the predicted chance the tests catch each (runs tests; sends code to Gemini).
     Gaps(query::GapsArgs),
+    /// Instant structural skeleton of Rust files, directories, or a dependency crate (`--dep`).
+    Outline(outline::Args),
     /// Help: `alsp help agents` prints the agent cheat sheet, `alsp help <command>` a command's help.
     Help { topic: Vec<String> },
     /// Review a diff with mechanical evidence and optional read-only agents.
@@ -73,6 +76,7 @@ fn main() -> ExitCode {
         Command::Tests(args) => query::tests(args),
         Command::Cover(args) => query::cover(args),
         Command::Gaps(args) => query::gaps(args),
+        Command::Outline(args) => outline::run(args),
         Command::Help { topic } => help(&topic),
         Command::Pack(args) => pack::run(args),
         Command::Review(args) => review::run(args),
