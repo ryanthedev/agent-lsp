@@ -16,9 +16,11 @@
 mod answer;
 mod ask;
 pub mod outline;
+pub mod prep;
 mod target;
 
 pub use answer::*;
+pub use prep::{PrepAnswer, PrepItem, PrepLink, PrepTargetError, DEFAULT_PREP_BUDGET};
 pub use target::{kind_str, Candidate, Target, TargetError};
 
 use alsp_coverage::CoverageTool;

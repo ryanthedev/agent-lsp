@@ -258,12 +258,12 @@ impl Answer {
 }
 
 /// A heuristic item ends in `~`.
-fn tilde(p: Provenance) -> &'static str {
+pub(crate) fn tilde(p: Provenance) -> &'static str {
     if p == Provenance::Heuristic { "~" } else { "" }
 }
 
 /// The section's tag: its own provenance, or `resolved+heuristic` when its items differ.
-fn mixed_tag(base: Provenance, items: impl Iterator<Item = Provenance>) -> String {
+pub(crate) fn mixed_tag(base: Provenance, items: impl Iterator<Item = Provenance>) -> String {
     let items: Vec<Provenance> = items.collect();
     if items.iter().any(|p| *p == Provenance::Heuristic) && items.iter().any(|p| *p == Provenance::Resolved) {
         "resolved+heuristic".into()
@@ -294,7 +294,7 @@ fn section_tagged<T>(out: &mut Vec<String>, head: &str, tag: &str, s: &Section<T
     }
 }
 
-fn span(s: Span) -> String {
+pub(crate) fn span(s: Span) -> String {
     if s.end == u32::MAX {
         "1-end".into()
     } else if s.start == s.end {
@@ -305,7 +305,7 @@ fn span(s: Span) -> String {
 }
 
 /// `200,215,+3 more` for a group's reference lines.
-fn lines(l: &[u32]) -> String {
+pub(crate) fn lines(l: &[u32]) -> String {
     let mut s = l.iter().take(LINES_SHOWN).map(u32::to_string).collect::<Vec<_>>().join(",");
     if l.len() > LINES_SHOWN {
         s.push_str(&format!(",+{} more", l.len() - LINES_SHOWN));

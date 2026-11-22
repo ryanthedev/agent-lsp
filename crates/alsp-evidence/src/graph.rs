@@ -154,12 +154,26 @@ impl<'a> Graph<'a> {
                 queue.push_back((ck, depth + 1));
             }
         }
-        found.sort_by(|a, b| (a.0, a.1, &a.2.file, a.2.line).cmp(&(b.0, b.1, &b.2.file, b.2.line)));
-        if found.len() > MAX_ENTRY_POINTS {
-            found.truncate(MAX_ENTRY_POINTS);
+        let cmp = |a: &(u32, EntryKind, Edge), b: &(u32, EntryKind, Edge)| {
+            (a.0, a.1, &a.2.file, a.2.line).cmp(&(b.0, b.1, &b.2.file, b.2.line))
+        };
+        let total = found.len();
+        // Resolved entry points (`test` and `main`) are kept before heuristic `pub` functions so
+        // many `pub` callers cannot crowd out tests when `MAX_ENTRY_POINTS` is reached.
+        let (mut resolved, mut heuristic): (Vec<_>, Vec<_>) =
+            found.into_iter().partition(|(_, kind, _)| *kind != EntryKind::Pub);
+        resolved.sort_by(cmp);
+        heuristic.sort_by(cmp);
+        resolved.truncate(MAX_ENTRY_POINTS);
+        let remaining = MAX_ENTRY_POINTS.saturating_sub(resolved.len());
+        heuristic.truncate(remaining);
+        let mut kept = resolved;
+        kept.extend(heuristic);
+        if kept.len() < total {
             truncated = true;
         }
-        Reach { entry_points: found.into_iter().map(|f| f.2).collect(), truncated }
+        kept.sort_by(cmp);
+        Reach { entry_points: kept.into_iter().map(|f| f.2).collect(), truncated }
     }
 }
 
@@ -326,5 +340,57 @@ mod tests {
         let mut g = Graph::new(&idx, &broken);
         let f = idx.def(&id_of(&idx, "src/lib.rs", "f")).unwrap().clone();
         assert!(g.entry_points(&f).entry_points.is_empty());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_DW_3_1_test_and_main_entry_points_survive_more_than_50_pub_callers() {
+        let mut lib = String::from("fn target() {}\n");
+        for i in 0..(MAX_ENTRY_POINTS + 15) {
+            lib.push_str(&format!("pub fn pub_{i:03}() {{\n    target();\n}}\n"));
+        }
+        let tests = "\
+#[test]
+fn t_deep_a() {
+    pub_000();
+}
+#[test]
+fn t_deep_b() {
+    pub_001();
+}
+#[test]
+fn t_deep_c() {
+    pub_002();
+}
+";
+        let main = "fn main() {\n    pub_003();\n}\n";
+        let (idx, mem) = setup(&[("src/lib.rs", &lib), ("src/t.rs", tests), ("src/main.rs", main)]);
+        let mut g = Graph::new(&idx, &mem);
+        let t = idx.def(&id_of(&idx, "src/lib.rs", "target")).unwrap().clone();
+        let r = g.entry_points(&t);
+        assert_eq!(r.entry_points.len(), MAX_ENTRY_POINTS);
+        assert!(r.truncated, "excess pub entry points were dropped");
+        let ep_names = names(&idx, &r.entry_points);
+        for must_keep in ["t::t_deep_a", "t::t_deep_b", "t::t_deep_c", "main::main"] {
+            assert!(ep_names.contains(&must_keep.to_string()), "missing {must_keep} in {ep_names:?}");
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_DW_3_1_truncated_is_false_when_pub_and_test_fit_within_cap() {
+        let mut lib = String::from("fn target() {}\n");
+        for i in 0..(MAX_ENTRY_POINTS - 2) {
+            lib.push_str(&format!("pub fn pub_{i:03}() {{\n    target();\n}}\n"));
+        }
+        let tests = "#[test]\nfn t_a() {\n    pub_000();\n}\n#[test]\nfn t_b() {\n    pub_001();\n}\n";
+        let (idx, mem) = setup(&[("src/lib.rs", &lib), ("src/t.rs", tests)]);
+        let mut g = Graph::new(&idx, &mem);
+        let t = idx.def(&id_of(&idx, "src/lib.rs", "target")).unwrap().clone();
+        let r = g.entry_points(&t);
+        assert_eq!(r.entry_points.len(), MAX_ENTRY_POINTS);
+        assert!(!r.truncated, "no entries or callers were dropped");
+        let ep_names = names(&idx, &r.entry_points);
+        assert!(ep_names.contains(&"t::t_a".to_string()) && ep_names.contains(&"t::t_b".to_string()));
     }
 }

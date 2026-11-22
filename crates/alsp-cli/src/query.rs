@@ -8,7 +8,7 @@
 use alsp_gaps::GapsConfig;
 use alsp_decide::DEFAULT_GAP_THRESHOLD;
 use alsp_index::Tool;
-use alsp_query::{Answer, OpenError, OpenOptions, TargetError, Workspace, DEFAULT_LIMIT};
+use alsp_query::{Answer, OpenError, OpenOptions, PrepAnswer, TargetError, Workspace, DEFAULT_LIMIT, DEFAULT_PREP_BUDGET};
 use clap::Args as ClapArgs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -108,20 +108,66 @@ pub struct GapsArgs {
     gap_threshold: f64,
 }
 
+#[derive(ClapArgs)]
+pub struct PrepArgs {
+    /// One or more symbol names (exact, or a unique `::` suffix) or `file:line` targets.
+    #[arg(required = true)]
+    targets: Vec<String>,
+    /// Approximate token budget for text output (default: 1500). Conflicts with `--all`.
+    #[arg(long, conflicts_with = "all")]
+    budget: Option<usize>,
+    /// Do not cap lists or apply a token budget. Conflicts with `--budget`.
+    #[arg(long, conflicts_with = "budget")]
+    all: bool,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+    /// Never run rust-analyzer to index: serve a fresh cached index or exit 3.
+    #[arg(long)]
+    no_build: bool,
+    /// Repository (any directory inside its work tree).
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Cache directory root (default: $ALSP_CACHE_DIR, else $XDG_CACHE_HOME/alsp, else ~/.cache/alsp).
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    /// Also index this Cargo package, relative to the repository (repeatable).
+    #[arg(long = "root")]
+    roots: Vec<PathBuf>,
+}
+
 fn print(text: &str) {
     // A closed pipe (`alsp refs x | head`) is not an error worth a panic.
     let _ = std::io::stdout().write_all(text.as_bytes());
 }
 
-fn open(c: &Common) -> Result<Workspace, ExitCode> {
-    let opened = Workspace::open(&OpenOptions { repo: c.repo.clone(), no_build: c.no_build, cache_root: c.cache_dir.clone(), tool: Tool::default(), extra_roots: c.roots.clone() });
+fn open_workspace(
+    repo: &PathBuf,
+    no_build: bool,
+    cache_dir: &Option<PathBuf>,
+    roots: &[PathBuf],
+    all: bool,
+) -> Result<Workspace, ExitCode> {
+    let opened = Workspace::open(&OpenOptions {
+        repo: repo.clone(),
+        no_build,
+        cache_root: cache_dir.clone(),
+        tool: Tool::default(),
+        extra_roots: roots.to_vec(),
+    });
     match opened {
-        Ok(ws) => Ok(ws.with_limit(if c.all { usize::MAX } else { DEFAULT_LIMIT }).with_progress(|s| eprintln!("alsp: {s}"))),
+        Ok(ws) => Ok(ws
+            .with_limit(if all { usize::MAX } else { DEFAULT_LIMIT })
+            .with_progress(|s| eprintln!("alsp: {s}"))),
         Err(e) => {
             eprintln!("alsp: {e}");
             Err(ExitCode::from(if matches!(e, OpenError::Unavailable(_)) { 3 } else { 2 }))
         }
     }
+}
+
+fn open(c: &Common) -> Result<Workspace, ExitCode> {
+    open_workspace(&c.repo, c.no_build, &c.cache_dir, &c.roots, c.all)
 }
 
 /// Print the answer (or the target error) and pick the exit code.
@@ -185,6 +231,29 @@ pub fn gaps(a: GapsArgs) -> ExitCode {
             let model = gap_model();
             let cfg = GapsConfig { budget: a.gap_budget, threshold: a.gap_threshold };
             finish(ws.gaps(&a.common.target, model.as_ref(), &cfg), a.common.json)
+        }
+        Err(code) => code,
+    }
+}
+
+fn finish_prep(answer: &PrepAnswer, json: bool) -> ExitCode {
+    print(&if json { answer.to_json() } else { answer.to_text() });
+    if answer.has_errors() {
+        for err in &answer.errors {
+            eprintln!("alsp: {}", err.hint);
+        }
+        ExitCode::from(4)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+pub fn prep(a: PrepArgs) -> ExitCode {
+    match open_workspace(&a.repo, a.no_build, &a.cache_dir, &a.roots, a.all) {
+        Ok(ws) => {
+            let budget = if a.all { None } else { Some(a.budget.unwrap_or(DEFAULT_PREP_BUDGET)) };
+            let answer = ws.prep(&a.targets, budget);
+            finish_prep(&answer, a.json)
         }
         Err(code) => code,
     }
@@ -324,5 +393,84 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let common = |repo: &std::path::Path, no_build| Common { target: "x".into(), repo: repo.to_path_buf(), json: false, all: false, no_build, cache_dir: Some(dir.path().join("cache")), roots: vec![] };
         assert_eq!(code(open(&common(&dir.path().join("nope"), true)).err().unwrap()), code(ExitCode::from(2)));
+    }
+
+    #[test]
+    fn test_DW_3_3_prep_cli_args_and_budget_conflicts_with_all() {
+        #[derive(Parser)]
+        struct PrepCli {
+            #[command(flatten)]
+            args: PrepArgs,
+        }
+        let parsed = PrepCli::try_parse_from(["alsp", "a::foo", "b::bar", "--budget", "900", "--json"]).unwrap().args;
+        assert_eq!(parsed.targets, vec!["a::foo", "b::bar"]);
+        assert_eq!(parsed.budget, Some(900));
+        assert!(!parsed.all);
+        assert!(parsed.json);
+
+        let all_parsed = PrepCli::try_parse_from(["alsp", "a::foo", "--all"]).unwrap().args;
+        assert!(all_parsed.all && all_parsed.budget.is_none());
+
+        assert!(PrepCli::try_parse_from(["alsp", "a::foo", "--all", "--budget", "500"]).is_err(), "--all must conflict with --budget");
+        assert!(PrepCli::try_parse_from(["alsp"]).is_err(), "at least one target is required");
+    }
+
+    #[test]
+    fn test_DW_3_5_finish_prep_exits_0_when_clean_and_4_on_partial_failure() {
+        let fresh = alsp_query::Freshness { status: "fresh".into(), rebuilt: false, head: "0".repeat(40), dirty: vec![] };
+        let clean = PrepAnswer {
+            schema: alsp_query::SCHEMA,
+            command: "prep".into(),
+            index: fresh.clone(),
+            notes: vec![],
+            budget_tokens: Some(DEFAULT_PREP_BUDGET),
+            items: vec![],
+            errors: vec![],
+        };
+        assert_eq!(code(finish_prep(&clean, false)), code(ExitCode::SUCCESS));
+        assert_eq!(code(finish_prep(&clean, true)), code(ExitCode::SUCCESS));
+
+        let partial = PrepAnswer {
+            errors: vec![alsp_query::PrepTargetError::from(TargetError::NoMatch {
+                query: "missing".into(),
+                nearest: vec!["lib::existing".into()],
+            })],
+            ..clean
+        };
+        assert_eq!(code(finish_prep(&partial, false)), code(ExitCode::from(4)));
+        assert_eq!(code(finish_prep(&partial, true)), code(ExitCode::from(4)));
+    }
+
+    #[test]
+    fn test_DW_3_5_prep_no_build_with_missing_cache_exits_3_without_running_rust_analyzer() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+        let run_git = |args: &[&str]| {
+            let out = alsp_evidence::git_command(&repo)
+                .unwrap()
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        run_git(&["init", "-q", "-b", "main"]);
+        run_git(&["add", "-A"]);
+        run_git(&["commit", "-q", "-m", "init"]);
+
+        let exit = prep(PrepArgs {
+            targets: vec!["hello".into()],
+            budget: None,
+            all: false,
+            json: false,
+            no_build: true,
+            repo,
+            cache_dir: Some(dir.path().join("empty-cache")),
+            roots: vec![],
+        });
+        assert_eq!(code(exit), code(ExitCode::from(3)));
     }
 }
