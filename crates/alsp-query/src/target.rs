@@ -98,6 +98,7 @@ pub fn kind_str(k: SymKind) -> &'static str {
         SymKind::Static => "static",
         SymKind::Struct => "struct",
         SymKind::Enum => "enum",
+        SymKind::Variant => "variant",
         SymKind::Trait => "trait",
         SymKind::TypeAlias => "type",
         SymKind::Macro => "macro",
@@ -284,6 +285,11 @@ mod tests {
     #[test]
     fn unsafe_relative_paths_are_refused() {
         assert!(safe_rel("src/a.rs") && !safe_rel("../a.rs") && !safe_rel("/a.rs") && !safe_rel(""));
+    }
+
+    #[test]
+    fn kind_str_formats_variant() {
+        assert_eq!(kind_str(SymKind::Variant), "variant");
     }
 
     #[test]

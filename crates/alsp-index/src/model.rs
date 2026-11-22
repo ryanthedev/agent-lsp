@@ -20,8 +20,9 @@ impl Span {
     }
 }
 
-/// The item kinds the index keeps. Locals, parameters, fields and variants are not kept: a change
-/// inside them belongs to the item that owns them.
+/// The item kinds the index keeps. Locals, parameters and fields are not kept: a change inside
+/// them belongs to the item that owns them. Enum variants are kept so queries can resolve them;
+/// diff attribution maps variant-line edits back to their enclosing enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymKind {
     Fn,
@@ -29,6 +30,7 @@ pub enum SymKind {
     Static,
     Struct,
     Enum,
+    Variant,
     Trait,
     TypeAlias,
     Macro,
@@ -394,6 +396,7 @@ mod tests {
         assert_eq!(readable_name(&format!("{p}frame/impl#[Frame]fin().")), "frame::Frame::fin");
         assert_eq!(readable_name(&format!("{p}frame/encode().")), "frame::encode");
         assert_eq!(readable_name(&format!("{p}frame/Kind#")), "frame::Kind");
+        assert_eq!(readable_name(&format!("{p}frame/Kind#Ping.")), "frame::Kind::Ping");
         assert_eq!(readable_name(&format!("{p}frame/MAX_LEN.")), "frame::MAX_LEN");
         assert_eq!(readable_name(&format!("{p}frame/")), "frame");
         assert_eq!(readable_name(&format!("{p}impl#[Mcp][Drop]drop().")), "<Mcp as Drop>::drop");
@@ -544,5 +547,6 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert!(SymKind::Fn.is_fn() && SymKind::Fn.is_code() && SymKind::Const.is_code());
         assert!(!SymKind::Struct.is_code() && !SymKind::Struct.is_fn());
+        assert!(!SymKind::Variant.is_code() && !SymKind::Variant.is_fn());
     }
 }

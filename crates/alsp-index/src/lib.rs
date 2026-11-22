@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Bump when the cached file format or the way facts are read from it changes.
-const SCHEMA: &str = "alsp-index-v1";
+const SCHEMA: &str = "alsp-index-v2";
 
 /// What the cache held when the call started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -582,5 +582,23 @@ mod tests {
         assert_eq!(cache_root_from(env(&[("ALSP_CACHE_DIR", ""), ("HOME", "/h")])), PathBuf::from("/h/.cache/alsp"), "empty counts as unset");
         assert_eq!(cache_root_from(env(&[])), std::env::temp_dir().join("alsp-cache"));
         assert!(default_cache_root().is_absolute());
+    }
+
+    #[test]
+    fn test_dw_1_2_schema_v2_rebuilds_v1_cache() {
+        assert_eq!(SCHEMA, "alsp-index-v2");
+        let e = env_with_units(&["."]);
+        fs::write(e.fx.join("root.scip"), scip_with_fn("a")).unwrap();
+        fs::create_dir_all(&e.cache).unwrap();
+        // Plant a cache file keyed with the previous v1 schema salt.
+        let v1_hash = tree_hash(&e.tree, "alsp-index-v1\nfake-ra 1").unwrap();
+        let v1_file = e.cache.join(format!("root.{v1_hash}.scip"));
+        fs::write(&v1_file, scip_with_fn("old")).unwrap();
+
+        let r = open(&e, BuildPolicy::Build);
+        assert_eq!((r.state.status, r.state.rebuilt), (IndexStatus::Stale, true));
+        assert_eq!(runs(&e.fx), 1, "v1 cache must trigger a rebuild under v2");
+        assert!(!v1_file.exists(), "superseded v1 cache file is removed");
+        assert!(r.index.unwrap().def(&format!("{P}m/a().")).is_some());
     }
 }

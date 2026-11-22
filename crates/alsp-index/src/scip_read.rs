@@ -16,6 +16,7 @@ fn kind_of(k: Kind) -> Option<SymKind> {
         Kind::StaticVariable => SymKind::Static,
         Kind::Struct => SymKind::Struct,
         Kind::Enum => SymKind::Enum,
+        Kind::EnumMember => SymKind::Variant,
         Kind::Trait => SymKind::Trait,
         Kind::TypeAlias => SymKind::TypeAlias,
         Kind::Macro => SymKind::Macro,
@@ -206,6 +207,54 @@ mod tests {
     #[test]
     fn garbage_is_an_error_not_a_panic() {
         assert!(read_scip(&[0xff, 0xff, 0xff], "").is_err());
+    }
+
+    #[test]
+    fn test_dw_1_1_and_1_5_enum_members_retained_with_refs_empty_enclosing_and_fields_excluded() {
+        let en = format!("{P}m/Outcome#");
+        let applied = format!("{P}m/Outcome#Applied.");
+        let empty_encl = format!("{P}m/Outcome#Skipped.");
+        let field = format!("{P}m/Row#id.");
+        let use_fn = format!("{P}m/run().");
+        let mut doc = Document::new();
+        doc.relative_path = "src/m.rs".into();
+        doc.occurrences = vec![
+            occ(vec![0, 5, 12], &en, 1, vec![0, 0, 4, 1]),
+            occ(vec![1, 4, 11], &applied, 1, vec![1, 4, 1, 12]),
+            // DW-1.5: EnumMember with empty enclosing_range falls back to occ.range without panic
+            occ(vec![2, 4, 11], &empty_encl, 1, vec![]),
+            // DW-1.5: Kind::Field is still excluded
+            occ(vec![6, 4, 6], &field, 1, vec![6, 4, 6, 12]),
+            occ(vec![9, 3, 6], &use_fn, 1, vec![9, 0, 12, 1]),
+            // References to both enum variants inside run()
+            occ(vec![10, 12, 19], &applied, 0, vec![]),
+            occ(vec![11, 12, 19], &empty_encl, 0, vec![]),
+        ];
+        doc.symbols = vec![
+            info(&en, Kind::Enum),
+            info(&applied, Kind::EnumMember),
+            info(&empty_encl, Kind::EnumMember),
+            info(&field, Kind::Field),
+            info(&use_fn, Kind::Function),
+        ];
+        let (defs, refs) = read_scip(&encode(vec![doc]), "").unwrap();
+        let d_applied = defs.iter().find(|d| d.id == applied).expect("Applied variant kept");
+        assert_eq!(d_applied.kind, SymKind::Variant);
+        assert_eq!(d_applied.name, "m::Outcome::Applied");
+        assert_eq!((d_applied.name_line, d_applied.span), (2, Span { start: 2, end: 2 }));
+
+        let d_empty = defs.iter().find(|d| d.id == empty_encl).expect("Skipped variant kept");
+        assert_eq!(d_empty.kind, SymKind::Variant);
+        assert_eq!(d_empty.name, "m::Outcome::Skipped");
+        assert_eq!((d_empty.name_line, d_empty.span), (3, Span { start: 3, end: 3 }));
+
+        assert!(defs.iter().all(|d| d.id != field), "Kind::Field must remain excluded");
+        assert_eq!(refs[&applied], vec![RefSite { file: "src/m.rs".into(), line: 11 }]);
+        assert_eq!(refs[&empty_encl], vec![RefSite { file: "src/m.rs".into(), line: 12 }]);
+
+        let idx = merge(vec![(defs, refs)]);
+        assert_eq!(idx.references(&applied), &[RefSite { file: "src/m.rs".into(), line: 11 }]);
+        assert_eq!(idx.references(&empty_encl), &[RefSite { file: "src/m.rs".into(), line: 12 }]);
     }
 }
 

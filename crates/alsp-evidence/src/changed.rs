@@ -38,6 +38,14 @@ fn blank(text: &str, line: u32) -> bool {
     text.lines().nth(line as usize - 1).is_none_or(|l| l.trim().is_empty())
 }
 
+/// Smallest non-variant definition covering `first..=last`: edits on an enum variant line belong
+/// to the enclosing `Enum` rather than reporting individual variants as top-level changed symbols.
+fn innermost_item<'a>(idx: &'a SymbolIndex, file: &str, first: u32, last: u32) -> Option<&'a Def> {
+    idx.defs_in(file)
+        .filter(|d| d.kind != SymKind::Variant && d.span.start <= first && last <= d.span.end)
+        .min_by_key(|d| (d.span.len(), d.kind == SymKind::Module, std::cmp::Reverse(d.span.start)))
+}
+
 /// Base-side items removed by the diff: overlapping a removed line, absent from the head file.
 fn removed_items<'a>(base: &'a FileSyntax, head: Option<&FileSyntax>, removed: std::ops::Range<u32>) -> Vec<&'a Item> {
     base.items
@@ -114,7 +122,7 @@ pub fn changed_symbols(diffs: &[FileDiff], idx: &SymbolIndex, src: &dyn Sources)
         for h in &fd.hunks {
             if h.new_len > 0 {
                 for line in h.new_lines() {
-                    if let Some(d) = idx.innermost(np, line) {
+                    if let Some(d) = innermost_item(idx, np, line, line) {
                         if d.kind == SymKind::Module && blank(text, line) {
                             continue;
                         }
@@ -123,7 +131,7 @@ pub fn changed_symbols(diffs: &[FileDiff], idx: &SymbolIndex, src: &dyn Sources)
                 }
             } else {
                 // Pure deletion between head lines `new_start` and `new_start + 1`.
-                let Some(d) = idx.innermost_covering(np, h.new_start.max(1), h.new_start + 1) else { continue };
+                let Some(d) = innermost_item(idx, np, h.new_start.max(1), h.new_start + 1) else { continue };
                 if d.kind == SymKind::Module {
                     // Deleting whole items (reported as Removed) or blank lines is not a module change.
                     let leftover = base_text.as_deref().is_some_and(|bt| {
@@ -321,5 +329,48 @@ mod tests {
         let c = changed_symbols(&d, &idx, &m);
         assert_eq!(summary(&c), vec![('M', "m::a".to_string())], "index spans still attribute the hunk");
         assert!(c.notes.iter().any(|n| n.contains("could not parse")));
+    }
+
+    #[test]
+    fn test_dw_1_4_editing_enum_variant_attributes_to_enclosing_enum() {
+        use protobuf::Message;
+        use scip::types::{symbol_information::Kind, Document, Index, Occurrence, SymbolInformation};
+
+        let base = "pub enum Outcome {\n    Applied,\n    Failed {\n        code: u32,\n        msg: String,\n    },\n}\n";
+        let head = "pub enum Outcome {\n    Applied(u32),\n    Failed {\n        code: u32,\n    },\n}\n";
+
+        let p = "rust-analyzer cargo fx 0.0.1 ";
+        let mut doc = Document::new();
+        doc.relative_path = "src/m.rs".into();
+        let defs = [
+            (format!("{p}m/"), Kind::Module, 1, 1, 6),
+            (format!("{p}m/Outcome#"), Kind::Enum, 1, 1, 6),
+            (format!("{p}m/Outcome#Applied."), Kind::EnumMember, 2, 2, 2),
+            (format!("{p}m/Outcome#Failed."), Kind::EnumMember, 3, 3, 5),
+        ];
+        for (sym, kind, name_line, start, end) in defs {
+            let mut o = Occurrence::new();
+            o.range = vec![name_line - 1, 0, 1];
+            o.symbol = sym.clone();
+            o.symbol_roles = 1;
+            o.enclosing_range = vec![start - 1, 0, end - 1, 1];
+            doc.occurrences.push(o);
+            let mut s = SymbolInformation::new();
+            s.symbol = sym;
+            s.kind = kind.into();
+            doc.symbols.push(s);
+        }
+        let mut scip_idx = Index::new();
+        scip_idx.documents = vec![doc];
+        let idx = alsp_index::index_from_scip(&scip_idx.write_to_bytes().unwrap()).unwrap();
+        // Sanity check: the raw index resolves line 2 to the Variant itself.
+        assert_eq!(idx.innermost("src/m.rs", 2).unwrap().kind, SymKind::Variant);
+
+        let m = mem(&[("src/m.rs", head)], &[("src/m.rs", base)]);
+        // Hunk 1: edit on line 2 (Applied variant); Hunk 2: pure deletion inside Failed struct variant (between head lines 4 and 5).
+        let d = [fd(Some("src/m.rs"), Some("src/m.rs"), &[(2, 1, 2, 1), (5, 1, 4, 0)])];
+        let c = changed_symbols(&d, &idx, &m);
+        assert_eq!(summary(&c), vec![('M', "m::Outcome".to_string())]);
+        assert_eq!(c.symbols[0].def.as_ref().unwrap().kind, SymKind::Enum);
     }
 }

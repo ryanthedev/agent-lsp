@@ -543,3 +543,122 @@ fn same_named_traits_leave_impls_unlinked_and_say_so() {
     let a = ws.refs("a::T::m").unwrap();
     assert!(a.notes.iter().any(|n| n.contains("1 impl method(s) of a::T::m could not be linked")), "{:?}", a.notes);
 }
+
+#[test]
+fn test_DW_1_3_sym_refs_and_tests_resolve_enum_variants_from_scip() {
+    // Minimal protobuf wire encoder for a synthetic SCIP Index containing an Enum, EnumMembers,
+    // a caller function, and a #[test] function referencing Outcome::Applied.
+    fn varint(buf: &mut Vec<u8>, mut v: u64) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                buf.push(b);
+                break;
+            }
+            buf.push(b | 0x80);
+        }
+    }
+    fn field_bytes(buf: &mut Vec<u8>, tag: u32, data: &[u8]) {
+        varint(buf, ((tag as u64) << 3) | 2);
+        varint(buf, data.len() as u64);
+        buf.extend_from_slice(data);
+    }
+    fn field_varint(buf: &mut Vec<u8>, tag: u32, v: u64) {
+        varint(buf, (tag as u64) << 3);
+        varint(buf, v);
+    }
+    fn packed_i32(vals: &[i32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &v in vals {
+            varint(&mut out, v as u64);
+        }
+        out
+    }
+    fn occ(range: &[i32], sym: &str, roles: i32, encl: &[i32]) -> Vec<u8> {
+        let mut b = Vec::new();
+        field_bytes(&mut b, 1, &packed_i32(range));
+        field_bytes(&mut b, 2, sym.as_bytes());
+        if roles != 0 {
+            field_varint(&mut b, 3, roles as u64);
+        }
+        if !encl.is_empty() {
+            field_bytes(&mut b, 7, &packed_i32(encl));
+        }
+        b
+    }
+    fn sym_info(sym: &str, kind: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        field_bytes(&mut b, 1, sym.as_bytes());
+        field_varint(&mut b, 5, kind);
+        b
+    }
+
+    let src = "\
+pub enum Outcome {
+    Applied,
+    Skipped,
+}
+pub fn apply() -> Outcome {
+    Outcome::Applied
+}
+#[test]
+fn t_apply() {
+    let _ = Outcome::Applied;
+}
+";
+    let p = "rust-analyzer cargo fx 0.1.0 ";
+    let en = format!("{p}Outcome#");
+    let applied = format!("{p}Outcome#Applied.");
+    let skipped = format!("{p}Outcome#Skipped.");
+    let apply = format!("{p}apply().");
+    let t_apply = format!("{p}t_apply().");
+
+    let mut doc = Vec::new();
+    field_bytes(&mut doc, 1, b"src/lib.rs");
+    for o in [
+        occ(&[0, 9, 16], &en, 1, &[0, 0, 3, 1]),
+        occ(&[1, 4, 11], &applied, 1, &[1, 4, 1, 12]),
+        occ(&[2, 4, 11], &skipped, 1, &[]),
+        occ(&[4, 7, 12], &apply, 1, &[4, 0, 6, 1]),
+        occ(&[5, 13, 20], &applied, 0, &[]),
+        occ(&[8, 3, 10], &t_apply, 1, &[7, 0, 10, 1]),
+        occ(&[9, 21, 28], &applied, 0, &[]),
+    ] {
+        field_bytes(&mut doc, 2, &o);
+    }
+    // SCIP SymbolInformation::Kind: Enum=11, EnumMember=12, Function=17
+    for s in [
+        sym_info(&en, 11),
+        sym_info(&applied, 12),
+        sym_info(&skipped, 12),
+        sym_info(&apply, 17),
+        sym_info(&t_apply, 17),
+    ] {
+        field_bytes(&mut doc, 3, &s);
+    }
+    let mut index = Vec::new();
+    field_bytes(&mut index, 2, &doc);
+
+    let (_d, ws) = world_of(src, index);
+
+    // kind_str(SymKind::Variant) == "variant"
+    assert_eq!(target::kind_str(alsp_index::SymKind::Variant), "variant");
+
+    // Workspace::sym resolves Enum::Variant
+    let s = ws.sym("Outcome::Applied").unwrap();
+    let m = s.matches.as_ref().unwrap();
+    assert_eq!(m.total, 1);
+    assert_eq!((m.items[0].name.as_str(), m.items[0].kind.as_str(), m.items[0].file.as_str(), m.items[0].line, m.items[0].references), ("Outcome::Applied", "variant", "src/lib.rs", 2, 2));
+
+    // Workspace::refs resolves Enum::Variant and groups references by enclosing symbol
+    let r = ws.refs("Outcome::Applied").unwrap();
+    let t = r.target.as_ref().unwrap();
+    assert_eq!((t.kind.as_str(), t.name.as_str(), t.file.as_str(), t.span.start, t.span.end), ("variant", "Outcome::Applied", "src/lib.rs", 2, 2));
+    assert_eq!(r.reference_count, Some(2));
+    assert_eq!(names(r.refs.as_ref().unwrap(), |g| g.symbol.clone()), ["apply", "t_apply"]);
+
+    // Workspace::tests resolves Enum::Variant and finds the test reaching it
+    let ts = ws.tests("Outcome::Applied", false).unwrap();
+    assert_eq!(names(ts.tests.as_ref().unwrap(), |t| t.name.clone()), ["t_apply"]);
+}
